@@ -47,10 +47,29 @@ export LIBVMM := $(abspath ../../)
 IMAGE_FILE := $(BUILD_DIR)/loader.img
 REPORT_FILE := $(BUILD_DIR)/report.txt
 
+SOURCE_GUEST_OUT ?= $(BUILD_DIR)/source_guest
+SOURCE_GUEST_LINUX := $(abspath $(SOURCE_GUEST_OUT)/linux/arch/arm64/boot/Image)
+SOURCE_GUEST_INITRD := $(abspath $(SOURCE_GUEST_OUT)/rootfs.cpio.gz)
+
 all: $(IMAGE_FILE)
 
 qemu $(IMAGE_FILE) $(REPORT_FILE) clean clobber: $(BUILD_DIR)/Makefile FORCE
 	$(MAKE) -C $(BUILD_DIR) MICROKIT_SDK=$(MICROKIT_SDK) $(notdir $@)
+
+.PHONY: source-guest source-build source-qemu
+
+# Build the aarch64 Linux guest and BusyBox initramfs from source.  LINUX_SRC
+# and BUSYBOX_SRC may be overridden to use any compatible source checkout.
+source-guest:
+	$(MAKE) -C guest OUT=$(abspath $(SOURCE_GUEST_OUT))
+
+source-build: source-guest
+	$(MAKE) MICROKIT_BOARD=$(MICROKIT_BOARD) MICROKIT_SDK=$(MICROKIT_SDK) \
+		BUILD_DIR=$(BUILD_DIR) LINUX=$(SOURCE_GUEST_LINUX) INITRD=$(SOURCE_GUEST_INITRD) all
+
+source-qemu: source-guest
+	$(MAKE) MICROKIT_BOARD=$(MICROKIT_BOARD) MICROKIT_SDK=$(MICROKIT_SDK) \
+		BUILD_DIR=$(BUILD_DIR) LINUX=$(SOURCE_GUEST_LINUX) INITRD=$(SOURCE_GUEST_INITRD) qemu
 
 $(BUILD_DIR)/Makefile: virtio_pci.mk
 	mkdir -p $(BUILD_DIR)

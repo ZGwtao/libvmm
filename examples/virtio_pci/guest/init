@@ -1,0 +1,14 @@
+#!/bin/busybox sh
+
+mount -t devtmpfs devtmpfs /dev
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+
+echo "source-built virtio_pci guest"
+
+for script in /etc/init.d/S99*; do
+    test -x "$script" || continue
+    "$script" || echo "startup script failed: $script"
+done
+
+exec setsid cttyhack /bin/sh

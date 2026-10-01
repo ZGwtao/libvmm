@@ -112,6 +112,19 @@ Trustworthy Systems' website. To use your own images, specify `LINUX` and/or
 make MICROKIT_BOARD=qemu_virt_aarch64 MICROKIT_SDK=/path/to/sdk LINUX=/path/to/linux INITRD=/path/to/initrd
 ```
 
+For the AArch64 QEMU board, the guest can also be built entirely from Linux
+and BusyBox source. The defaults reuse the source trees from the neighbouring
+`Xhute` checkout; override `LINUX_SRC` and `BUSYBOX_SRC` when required:
+
+```sh
+make MICROKIT_BOARD=qemu_virt_aarch64 MICROKIT_SDK=/path/to/sdk source-build
+make MICROKIT_BOARD=qemu_virt_aarch64 MICROKIT_SDK=/path/to/sdk source-qemu
+```
+
+The generated kernel and initramfs are placed under
+`build/source_guest`. The kernel configuration also enables virtio-vsock so
+the same guest build can be used while developing the new device.
+
 If you would like to simulate the QEMU board you can run the following command:
 ```sh
 make MICROKIT_BOARD=qemu_virt_aarch64 MICROKIT_SDK=/path/to/sdk qemu
