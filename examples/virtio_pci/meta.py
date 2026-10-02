@@ -1,6 +1,7 @@
 # Copyright 2025, UNSW
 # SPDX-License-Identifier: BSD-2-Clause
 import argparse
+import struct
 from typing import Optional
 from board import BOARDS, add_x86_hpet
 from sdfgen import SystemDescription, Sddf, DeviceTree, Vmm
@@ -14,6 +15,36 @@ MemoryRegion = SystemDescription.MemoryRegion
 Map = SystemDescription.Map
 Channel = SystemDescription.Channel
 IrqIoapic = SystemDescription.IrqIoapic
+
+VSOCK_QUEUE_CAPACITY = 8
+VSOCK_PACKET_BUFFER_SIZE = 4096
+VSOCK_CHANNEL = 20
+
+
+def serialise_vsock_config(output_dir, name, tx_queue, tx_data, rx_queue, rx_data):
+    """Serialise virtio_vsock_transport_config_t for a 64-bit Microkit target."""
+    queue_region_size = 0x1000
+    data_region_size = VSOCK_QUEUE_CAPACITY * VSOCK_PACKET_BUFFER_SIZE
+    fields = (
+        tx_queue.vaddr,
+        queue_region_size,
+        tx_data.vaddr,
+        data_region_size,
+        rx_queue.vaddr,
+        queue_region_size,
+        rx_data.vaddr,
+        data_region_size,
+    )
+    data = struct.pack(
+        "<5s3x" + "QQ" * 4 + "IIB7x",
+        b"sDDF\x07",
+        *fields,
+        VSOCK_QUEUE_CAPACITY,
+        VSOCK_PACKET_BUFFER_SIZE,
+        VSOCK_CHANNEL,
+    )
+    with open(f"{output_dir}/virtio_vsock_transport_{name}.data", "wb") as output:
+        output.write(data)
 
 
 # @billn very hacky, resolve properly once PCI driver is merged in sDDF
@@ -195,6 +226,69 @@ def generate(
     pds = [blk_driver, blk_virt]
     for pd in pds:
         sdf.add_pd(pd)
+
+    # Virtio-vsock packet transport. Queue metadata and packet data are kept in
+    # separate regions, following the sDDF queue/config pattern.
+    vsock_backend = ProtectionDomain("vsock_backend", "vsock_backend.elf", priority=97)
+    vsock_guest_to_host_queue = MemoryRegion(sdf, "vsock_guest_to_host_queue", 0x1000)
+    vsock_host_to_guest_queue = MemoryRegion(sdf, "vsock_host_to_guest_queue", 0x1000)
+    vsock_guest_to_host_data = MemoryRegion(
+        sdf, "vsock_guest_to_host_data", VSOCK_QUEUE_CAPACITY * VSOCK_PACKET_BUFFER_SIZE
+    )
+    vsock_host_to_guest_data = MemoryRegion(
+        sdf, "vsock_host_to_guest_data", VSOCK_QUEUE_CAPACITY * VSOCK_PACKET_BUFFER_SIZE
+    )
+    for mr in [
+        vsock_guest_to_host_queue,
+        vsock_host_to_guest_queue,
+        vsock_guest_to_host_data,
+        vsock_host_to_guest_data,
+    ]:
+        sdf.add_mr(mr)
+
+    guest_to_host_queue_vmm = Map(vsock_guest_to_host_queue, vaddr=0x30000000, perms="rw")
+    host_to_guest_queue_vmm = Map(vsock_host_to_guest_queue, vaddr=0x30001000, perms="rw")
+    guest_to_host_data_vmm = Map(vsock_guest_to_host_data, vaddr=0x30002000, perms="rw")
+    host_to_guest_data_vmm = Map(vsock_host_to_guest_data, vaddr=0x3000A000, perms="rw")
+    for mapping in [
+        guest_to_host_queue_vmm,
+        host_to_guest_queue_vmm,
+        guest_to_host_data_vmm,
+        host_to_guest_data_vmm,
+    ]:
+        vmm_client0.add_map(mapping)
+
+    guest_to_host_queue_backend = Map(vsock_guest_to_host_queue, vaddr=0x30000000, perms="rw")
+    host_to_guest_queue_backend = Map(vsock_host_to_guest_queue, vaddr=0x30001000, perms="rw")
+    guest_to_host_data_backend = Map(vsock_guest_to_host_data, vaddr=0x30002000, perms="rw")
+    host_to_guest_data_backend = Map(vsock_host_to_guest_data, vaddr=0x3000A000, perms="rw")
+    for mapping in [
+        guest_to_host_queue_backend,
+        host_to_guest_queue_backend,
+        guest_to_host_data_backend,
+        host_to_guest_data_backend,
+    ]:
+        vsock_backend.add_map(mapping)
+
+    sdf.add_pd(vsock_backend)
+    sdf.add_channel(Channel(vmm_client0, vsock_backend, a_id=VSOCK_CHANNEL, b_id=VSOCK_CHANNEL))
+
+    serialise_vsock_config(
+        output_dir,
+        "CLIENT_VMM",
+        guest_to_host_queue_vmm,
+        guest_to_host_data_vmm,
+        host_to_guest_queue_vmm,
+        host_to_guest_data_vmm,
+    )
+    serialise_vsock_config(
+        output_dir,
+        "vsock_backend",
+        host_to_guest_queue_backend,
+        host_to_guest_data_backend,
+        guest_to_host_queue_backend,
+        guest_to_host_data_backend,
+    )
 
     # Timer subsystem (Maaxboard specific as its blk driver needs a timer)
     if board.name == "maaxboard":

@@ -6,6 +6,9 @@ mount -t sysfs sysfs /sys
 
 echo "source-built virtio_pci guest"
 
+echo "testing virtio-vsock stream transport"
+/bin/vsock-hello || echo "virtio-vsock hello test failed"
+
 for script in /etc/init.d/S99*; do
     test -x "$script" || continue
     "$script" || echo "startup script failed: $script"

@@ -87,7 +87,7 @@ include $(LIBVMM)/vmm.mk
 include $(LIBVMM_TOOLS)/linux/blk/blk_init.mk
 include $(LIBVMM_TOOLS)/linux/net/net_init.mk
 
-IMAGES := client_vmm.elf timer_driver.elf blk_driver.elf blk_virt.elf serial_driver.elf serial_virt_tx.elf serial_virt_rx.elf \
+IMAGES := client_vmm.elf vsock_backend.elf timer_driver.elf blk_driver.elf blk_virt.elf serial_driver.elf serial_virt_tx.elf serial_virt_rx.elf \
 	network_virt_rx.elf network_virt_tx.elf eth_driver.elf network_copy.elf
 
 CHECK_FLAGS_BOARD_MD5 := .board_cflags-$(shell echo -- $(CFLAGS) $(BOARD) $(MICROKIT_CONFIG) | shasum | sed 's/ *-//')
@@ -133,6 +133,8 @@ endif
 	$(OBJCOPY) --update-section .net_virt_tx_config=net_virt_tx.data network_virt_tx.elf
 	$(OBJCOPY) --update-section .net_copy_config=net_copy_client0_net_copier.data network_copy.elf network_copy.elf
 	$(OBJCOPY) --update-section .net_client_config=net_client_CLIENT_VMM.data client_vmm.elf
+	$(OBJCOPY) --update-section .virtio_vsock_transport_config=virtio_vsock_transport_CLIENT_VMM.data client_vmm.elf
+	$(OBJCOPY) --update-section .virtio_vsock_transport_config=virtio_vsock_transport_vsock_backend.data vsock_backend.elf
 
 $(IMAGE_FILE) $(REPORT_FILE): $(IMAGES) $(SYSTEM_FILE)
 	$(MICROKIT_TOOL) $(SYSTEM_FILE) --search-path $(BUILD_DIR) --board $(MICROKIT_BOARD) \
@@ -205,6 +207,12 @@ client_vm/images.o: $(LIBVMM)/tools/package_guest_images.S ${LINUX} $(CHECK_FLAG
 endif
 
 client_vmm.elf: client_vm/vmm.o client_vm/guest_arch_init.o client_vm/images.o libvmm.a |client_vm
+	$(LD) $(LDFLAGS) $^ $(LIBS) -o $@
+
+vsock_backend.o: $(VIRTIO_EXAMPLE)/vsock_backend.c $(CHECK_FLAGS_BOARD_MD5)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+vsock_backend.elf: vsock_backend.o
 	$(LD) $(LDFLAGS) $^ $(LIBS) -o $@
 
 # Stop make from deleting intermediate files

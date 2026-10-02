@@ -125,6 +125,22 @@ The generated kernel and initramfs are placed under
 `build/source_guest`. The kernel configuration also enables virtio-vsock so
 the same guest build can be used while developing the new device.
 
+This configuration exposes guest CID 3 as a virtio-vsock PCI function in slot
+3. A separate `vsock_backend` protection domain listens as host CID 2 on stream
+port 1234. The source-built guest runs `/bin/vsock-hello` during boot; success
+looks like:
+
+```
+VSOCK_BACKEND: stream connection 3:... -> 2:1234
+VSOCK_BACKEND: received 16 stream bytes
+vsock-hello: received: hello world from vsock backend
+```
+
+The VMM/backend ABI uses two sDDF-style SPSC packet queues, separate packet data
+regions, externally patched endpoint-relative configuration, and notifications.
+The example backend implements only the stream operations needed for this test,
+rather than embedding a host socket stack in libvmm.
+
 If you would like to simulate the QEMU board you can run the following command:
 ```sh
 make MICROKIT_BOARD=qemu_virt_aarch64 MICROKIT_SDK=/path/to/sdk qemu
