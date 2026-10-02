@@ -56,12 +56,16 @@ all: $(IMAGE_FILE)
 qemu $(IMAGE_FILE) $(REPORT_FILE) clean clobber: $(BUILD_DIR)/Makefile FORCE
 	$(MAKE) -C $(BUILD_DIR) MICROKIT_SDK=$(MICROKIT_SDK) $(notdir $@)
 
-.PHONY: source-guest source-build source-qemu
+.PHONY: source-guest source-kubelet source-build source-qemu
 
 # Build the aarch64 Linux guest and BusyBox initramfs from source.  LINUX_SRC
 # and BUSYBOX_SRC may be overridden to use any compatible source checkout.
 source-guest:
 	$(MAKE) -C guest OUT=$(abspath $(SOURCE_GUEST_OUT))
+
+# Download the pinned Go/Kubernetes sources and build only the arm64 kubelet.
+source-kubelet:
+	$(MAKE) -C guest OUT=$(abspath $(SOURCE_GUEST_OUT)) kubelet
 
 source-build: source-guest
 	$(MAKE) MICROKIT_BOARD=$(MICROKIT_BOARD) MICROKIT_SDK=$(MICROKIT_SDK) \

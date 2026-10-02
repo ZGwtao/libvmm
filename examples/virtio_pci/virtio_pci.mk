@@ -197,9 +197,14 @@ client_vm/rootfs.cpio.gz: ${INITRD} \
 blk_storage:
 	$(SDDF)/tools/mkvirtdisk $@ $(BLK_NUM_PART) $(BLK_SIZE) $(BLK_MEM) GPT
 
-client_vm/vm.dts: $(CLIENT_VM)/linux.dts $(CLIENT_VM)/$(GIC_DT_OVERLAY) \
+client_vm/vm.dts: $(CLIENT_VM)/linux.dts $(CLIENT_VM)/$(GIC_DT_OVERLAY) client_vm/rootfs.cpio.gz \
 	$(CHECK_FLAGS_BOARD_MD5) |client_vm
 	$(LIBVMM)/tools/dtscat $(word 1,$^) $(word 2,$^) > $@
+	@initrd_size=$$(stat -c %s client_vm/rootfs.cpio.gz); \
+	initrd_end=$$((0x50000000 + initrd_size)); \
+	test $$initrd_end -lt $$((0x5f000000)) || { echo "initramfs overlaps guest DTB"; exit 1; }; \
+	initrd_end_hex=$$(printf '0x%x' $$initrd_end); \
+	sed -i "s/linux,initrd-end = <0x5f000000>/linux,initrd-end = <$$initrd_end_hex>/" $@
 
 client_vm/vm.dtb: client_vm/vm.dts |client_vm
 	$(DTC) -q -I dts -O dtb $< > $@
