@@ -126,20 +126,33 @@ The generated kernel and initramfs are placed under
 the same guest build can be used while developing the new device.
 
 This configuration exposes guest CID 3 as a virtio-vsock PCI function in slot
-3. A separate `vsock_backend` protection domain listens as host CID 2 on stream
-port 1234. The source-built guest runs `/bin/vsock-hello` during boot; success
-looks like:
+3. The `vsock_backend` protection domain is a Unikraft unikernel built with
+`dep/uk-on-mk`. A small external Unikraft library registers an AF_VSOCK socket
+family, consumes the shared transport as host CID 2, and exposes ordinary
+`socket`, `bind`, `listen`, `accept`, `read`, and `write` calls to the host
+application. Once the source-built guest reaches its shell, run
+`/bin/vsock-hello`, type one or more lines, and use `/quit` (or Ctrl-D) to
+disconnect. The host application echoes each byte stream back to the guest:
 
 ```
-VSOCK_BACKEND: stream connection 3:... -> 2:1234
-VSOCK_BACKEND: received 16 stream bytes
-vsock-hello: received: hello world from vsock backend
+HOST_VSOCK_APP: listening on CID 2 port 1234
+~ # vsock-hello
+vsock-hello: connected to CID 2 port 1234
+Type a line to echo over AF_VSOCK; use /quit or Ctrl-D to exit.
+vsock> hello from guest
+HOST_VSOCK_APP: client connected
+HOST_VSOCK_APP: echoing 17 byte(s): hello from guest
+echo: hello from guest
+vsock> /quit
 ```
 
 The VMM/backend ABI uses two sDDF-style SPSC packet queues, separate packet data
 regions, externally patched endpoint-relative configuration, and notifications.
-The example backend implements only the stream operations needed for this test,
-rather than embedding a host socket stack in libvmm.
+The host AF_VSOCK implementation is intentionally a stream-only prototype with
+one listener and one active connection. It keeps the application/socket layer
+out of libvmm: libvmm remains responsible only for the virtio device and packet
+transport, while the Unikraft PD owns host endpoint semantics and application
+logic.
 
 If you would like to simulate the QEMU board you can run the following command:
 ```sh

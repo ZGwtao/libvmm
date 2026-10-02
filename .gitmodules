@@ -2,3 +2,6 @@
 	path = dep/sddf
 	url = https://github.com/au-ts/sddf
 	branch = main
+[submodule "dep/uk-on-mk"]
+	path = dep/uk-on-mk
+	url = https://github.com/ZGwtao/uk-on-mk.git

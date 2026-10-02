@@ -87,6 +87,26 @@ include $(LIBVMM)/vmm.mk
 include $(LIBVMM_TOOLS)/linux/blk/blk_init.mk
 include $(LIBVMM_TOOLS)/linux/net/net_init.mk
 
+UK_ON_MK := $(LIBVMM)/dep/uk-on-mk
+UK_ROOT := $(UK_ON_MK)/dep/unikraft
+UK_VSOCK_APP := $(VIRTIO_EXAMPLE)/host_vsock
+UK_VSOCK_LIB := $(VIRTIO_EXAMPLE)/unikraft/libvsock
+UK_VSOCK_BUILD := $(BUILD_DIR)/uk/vsock_backend
+UK_VSOCK_CONFIGURED := $(UK_VSOCK_BUILD)/.configured
+UK_VSOCK_IMAGE := $(UK_VSOCK_BUILD)/host_vsock_default-arm64
+UK_VSOCK_MAKE_ARGS := \
+	A=$(UK_VSOCK_APP) \
+	O=$(UK_VSOCK_BUILD) \
+	C=$(UK_VSOCK_BUILD)/.config \
+	L=$(UK_VSOCK_LIB) \
+	SDDF=$(SDDF) \
+	LIBVMM=$(LIBVMM) \
+	MICROKIT_SDK=$(MICROKIT_SDK) \
+	MICROKIT_BOARD=$(MICROKIT_BOARD) \
+	MICROKIT_CONFIG=$(MICROKIT_CONFIG) \
+	BOARD_DIR=$(BOARD_DIR) \
+	SDDF_UTIL_LIB=$(abspath libsddf_util.a)
+
 IMAGES := client_vmm.elf vsock_backend.elf timer_driver.elf blk_driver.elf blk_virt.elf serial_driver.elf serial_virt_tx.elf serial_virt_rx.elf \
 	network_virt_rx.elf network_virt_tx.elf eth_driver.elf network_copy.elf
 
@@ -113,9 +133,15 @@ endif
 ifeq ($(MICROKIT_BOARD), maaxboard)
 	$(OBJCOPY) --update-section .device_resources=timer_driver_device_resources.data timer_driver.elf
 	$(OBJCOPY) --update-section .timer_client_config=timer_client_blk_driver.data blk_driver.elf
+else ifeq ($(MICROKIT_BOARD), qemu_virt_aarch64)
+	$(OBJCOPY) --update-section .device_resources=timer_driver_device_resources.data timer_driver.elf
 else ifeq ($(ARCH),x86_64)
 	$(OBJCOPY) --update-section .device_resources=timer_driver_device_resources.data timer_driver.elf
 	$(OBJCOPY) --update-section .timer_client_config=timer_client_CLIENT_VMM.data client_vmm.elf
+endif
+
+ifeq ($(ARCH),aarch64)
+	$(OBJCOPY) --update-section .timer_client_config=timer_client_vsock_backend.data vsock_backend.elf
 endif
 	$(OBJCOPY) --update-section .device_resources=blk_driver_device_resources.data blk_driver.elf
 	$(OBJCOPY) --update-section .blk_driver_config=blk_driver.data blk_driver.elf
@@ -126,6 +152,7 @@ endif
 	$(OBJCOPY) --update-section .serial_virt_rx_config=serial_virt_rx.data serial_virt_rx.elf
 	$(OBJCOPY) --update-section .serial_virt_tx_config=serial_virt_tx.data serial_virt_tx.elf
 	$(OBJCOPY) --update-section .serial_client_config=serial_client_CLIENT_VMM.data client_vmm.elf
+	$(OBJCOPY) --update-section .serial_client_config=serial_client_vsock_backend.data vsock_backend.elf
 	$(OBJCOPY) --update-section .vmm_config=vmm_CLIENT_VMM.data client_vmm.elf
 	$(OBJCOPY) --update-section .device_resources=eth_driver_device_resources.data eth_driver.elf
 	$(OBJCOPY) --update-section .net_driver_config=net_driver.data eth_driver.elf
@@ -209,11 +236,26 @@ endif
 client_vmm.elf: client_vm/vmm.o client_vm/guest_arch_init.o client_vm/images.o libvmm.a |client_vm
 	$(LD) $(LDFLAGS) $^ $(LIBS) -o $@
 
-vsock_backend.o: $(VIRTIO_EXAMPLE)/vsock_backend.c $(CHECK_FLAGS_BOARD_MD5)
-	$(CC) $(CFLAGS) -c -o $@ $<
+$(UK_VSOCK_CONFIGURED): $(VIRTIO_EXAMPLE)/unikraft/vsock.config \
+		$(VIRTIO_EXAMPLE)/host_vsock/Makefile.uk \
+		$(VIRTIO_EXAMPLE)/unikraft/libvsock/Config.uk \
+		$(VIRTIO_EXAMPLE)/unikraft/libvsock/Makefile.uk
+	mkdir -p $(UK_VSOCK_BUILD)
+	cp $(VIRTIO_EXAMPLE)/unikraft/vsock.config $(UK_VSOCK_BUILD)/defconfig
+	env -u BUILD_DIR -u MAKEFLAGS -u MAKEOVERRIDES \
+		$(MAKE) -C $(UK_ROOT) $(UK_VSOCK_MAKE_ARGS) \
+		UK_DEFCONFIG=$(UK_VSOCK_BUILD)/defconfig defconfig
+	touch $@
 
-vsock_backend.elf: vsock_backend.o
-	$(LD) $(LDFLAGS) $^ $(LIBS) -o $@
+$(UK_VSOCK_IMAGE): $(UK_VSOCK_CONFIGURED) libsddf_util.a \
+		$(VIRTIO_EXAMPLE)/host_vsock/main.c \
+		$(VIRTIO_EXAMPLE)/unikraft/libvsock/vsock.c \
+		$(VIRTIO_EXAMPLE)/unikraft/libvsock/include/uk/vsock.h
+	env -u BUILD_DIR -u MAKEFLAGS -u MAKEOVERRIDES \
+		$(MAKE) -C $(UK_ROOT) $(UK_VSOCK_MAKE_ARGS)
+
+vsock_backend.elf: $(UK_VSOCK_IMAGE)
+	cp $< $@
 
 # Stop make from deleting intermediate files
 .PRECIOUS: client_vm client_vm/vm.dts client_vm/vm.dtb \

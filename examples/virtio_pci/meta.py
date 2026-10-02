@@ -147,6 +147,16 @@ def generate(
     client0 = Vmm(sdf, vmm_client0, vm_client0, client_dtb)
     sdf.add_pd(vmm_client0)
 
+    # The host AF_VSOCK endpoint is a Unikraft application. Its heap is kept
+    # separate from the shared transport regions below.
+    vsock_backend = ProtectionDomain(
+        "vsock_backend", "vsock_backend.elf", priority=97, stack_size=0x20000
+    )
+    vsock_heap = MemoryRegion(sdf, "vsock_backend_heap", 0x4000000)
+    sdf.add_mr(vsock_heap)
+    vsock_backend.add_map(Map(vsock_heap, vaddr=0x200000000, perms="rw"))
+    sdf.add_pd(vsock_backend)
+
     # Serial subsystem
     serial_driver = ProtectionDomain("serial_driver", "serial_driver.elf", priority=200)
     serial_virt_tx = ProtectionDomain(
@@ -171,6 +181,7 @@ def generate(
         enable_color=False,
     )
     serial_system.add_client(vmm_client0)
+    serial_system.add_client(vsock_backend)
 
     pds = [
         serial_driver,
@@ -229,7 +240,6 @@ def generate(
 
     # Virtio-vsock packet transport. Queue metadata and packet data are kept in
     # separate regions, following the sDDF queue/config pattern.
-    vsock_backend = ProtectionDomain("vsock_backend", "vsock_backend.elf", priority=97)
     vsock_guest_to_host_queue = MemoryRegion(sdf, "vsock_guest_to_host_queue", 0x1000)
     vsock_host_to_guest_queue = MemoryRegion(sdf, "vsock_host_to_guest_queue", 0x1000)
     vsock_guest_to_host_data = MemoryRegion(
@@ -270,7 +280,6 @@ def generate(
     ]:
         vsock_backend.add_map(mapping)
 
-    sdf.add_pd(vsock_backend)
     sdf.add_channel(Channel(vmm_client0, vsock_backend, a_id=VSOCK_CHANNEL, b_id=VSOCK_CHANNEL))
 
     serialise_vsock_config(
@@ -290,8 +299,9 @@ def generate(
         guest_to_host_data_backend,
     )
 
-    # Timer subsystem (Maaxboard specific as its blk driver needs a timer)
-    if board.name == "maaxboard":
+    # Unikraft's Carrels platform requires a timer client. Maaxboard's block
+    # driver is an additional timer client.
+    if board.arch != SystemDescription.Arch.X86_64:
         timer_node = dtb.node(board.timer)
         assert timer_node is not None
 
@@ -300,7 +310,9 @@ def generate(
         )
         timer_system = Sddf.Timer(sdf, timer_node, timer_driver)
 
-        timer_system.add_client(blk_driver)
+        timer_system.add_client(vsock_backend)
+        if board.name == "maaxboard":
+            timer_system.add_client(blk_driver)
         sdf.add_pd(timer_driver)
 
         assert timer_system.connect()

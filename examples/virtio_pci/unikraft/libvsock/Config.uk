@@ -1,0 +1,7 @@
+config LIBVSOCK
+	bool "vsock: Microkit virtio-vsock host socket family"
+	default y
+	select LIBPOSIX_SOCKET
+	help
+		Minimal AF_VSOCK/SOCK_STREAM host implementation backed by the
+		libvmm-to-PD shared packet queues.

@@ -1,0 +1,3 @@
+$(eval $(call addlib,apphostvsock))
+
+APPHOSTVSOCK_SRCS-y += $(APPHOSTVSOCK_BASE)/main.c
