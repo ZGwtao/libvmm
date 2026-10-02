@@ -6,6 +6,8 @@ mount -t sysfs sysfs /sys
 
 echo "source-built virtio_pci guest"
 
+/bin/vsock-shim &
+
 for script in /etc/init.d/S99*; do
     test -x "$script" || continue
     case "$script" in

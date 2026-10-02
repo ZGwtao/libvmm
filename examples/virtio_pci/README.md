@@ -130,20 +130,22 @@ This configuration exposes guest CID 3 as a virtio-vsock PCI function in slot
 `dep/uk-on-mk`. A small external Unikraft library registers an AF_VSOCK socket
 family, consumes the shared transport as host CID 2, and exposes ordinary
 `socket`, `bind`, `listen`, `accept`, `read`, and `write` calls to the host
-application. Once the source-built guest reaches its shell, run
-`/bin/vsock-hello`, type one or more lines, and use `/quit` (or Ctrl-D) to
-disconnect. The host application echoes each byte stream back to the guest:
+application. The guest starts `/bin/vsock-shim`, which listens on the Unix
+domain socket `/run/vsock-shim.sock` and proxies length-prefixed messages to
+host CID 2, port 1234. Once the guest reaches its shell, run `/bin/uds-client`,
+type one or more lines, and use `/quit` (or Ctrl-D) to disconnect:
 
 ```
 HOST_VSOCK_APP: listening on CID 2 port 1234
-~ # vsock-hello
-vsock-hello: connected to CID 2 port 1234
-Type a line to echo over AF_VSOCK; use /quit or Ctrl-D to exit.
-vsock> hello from guest
+vsock-shim: UDS /run/vsock-shim.sock -> CID 2 port 1234
+~ # uds-client
+uds-client: connected to /run/vsock-shim.sock
+Type a line to echo through UDS and AF_VSOCK; use /quit or Ctrl-D to exit.
+uds> hello from guest
 HOST_VSOCK_APP: client connected
 HOST_VSOCK_APP: echoing 17 byte(s): hello from guest
 echo: hello from guest
-vsock> /quit
+uds> /quit
 ```
 
 The VMM/backend ABI uses two sDDF-style SPSC packet queues, separate packet data

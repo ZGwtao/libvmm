@@ -16,7 +16,8 @@ BUSYBOX_OUT := $(OUT)/busybox
 ROOTFS := $(OUT)/rootfs
 IMAGE := $(LINUX_OUT)/arch/arm64/boot/Image
 INITRAMFS := $(OUT)/rootfs.cpio.gz
-VSOCK_HELLO := $(OUT)/vsock-hello
+VSOCK_SHIM := $(OUT)/vsock-shim
+UDS_CLIENT := $(OUT)/uds-client
 
 .PHONY: all kernel rootfs check-sources clean
 
@@ -53,15 +54,21 @@ $(BUSYBOX_OUT)/busybox: $(BUSYBOX_OUT)/.config
 
 rootfs: $(INITRAMFS)
 
-$(VSOCK_HELLO): vsock_hello.c
+$(VSOCK_SHIM): vsock_shim.c
 	mkdir -p $(OUT)
 	$(CROSS_COMPILE)gcc -static -O2 -Wall -Wextra -o $@ $<
 
-$(INITRAMFS): $(BUSYBOX_OUT)/busybox $(VSOCK_HELLO) init Makefile busybox.fragment
-	mkdir -p $(ROOTFS)/bin $(ROOTFS)/dev $(ROOTFS)/etc/init.d $(ROOTFS)/mnt $(ROOTFS)/proc $(ROOTFS)/sys $(ROOTFS)/tmp $(ROOTFS)/usr/share/udhcpc
+$(UDS_CLIENT): uds_client.c
+	mkdir -p $(OUT)
+	$(CROSS_COMPILE)gcc -static -O2 -Wall -Wextra -o $@ $<
+
+$(INITRAMFS): $(BUSYBOX_OUT)/busybox $(VSOCK_SHIM) $(UDS_CLIENT) init Makefile busybox.fragment
+	mkdir -p $(ROOTFS)/bin $(ROOTFS)/dev $(ROOTFS)/etc/init.d $(ROOTFS)/mnt $(ROOTFS)/proc $(ROOTFS)/run $(ROOTFS)/sys $(ROOTFS)/tmp $(ROOTFS)/usr/share/udhcpc
 	$(MAKE) -C $(BUSYBOX_SRC) O=$(BUSYBOX_OUT) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) CONFIG_PREFIX=$(ROOTFS) install
 	install -m 0755 init $(ROOTFS)/init
-	install -m 0755 $(VSOCK_HELLO) $(ROOTFS)/bin/vsock-hello
+	$(RM) $(ROOTFS)/bin/vsock-hello
+	install -m 0755 $(VSOCK_SHIM) $(ROOTFS)/bin/vsock-shim
+	install -m 0755 $(UDS_CLIENT) $(ROOTFS)/bin/uds-client
 	install -m 0755 $(BUSYBOX_SRC)/examples/udhcp/simple.script $(ROOTFS)/usr/share/udhcpc/default.script
 	cd $(ROOTFS) && find . -print0 | cpio --null -o --format=newc | gzip -9 > $(INITRAMFS)
 
