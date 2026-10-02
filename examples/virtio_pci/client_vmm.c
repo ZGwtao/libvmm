@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <microkit.h>
 #include <libvmm/libvmm.h>
+#include <libvmm/virtio/vsock_config.h>
 #include <sddf/serial/queue.h>
 #include <sddf/serial/config.h>
 #include <sddf/blk/queue.h>
@@ -21,6 +22,7 @@ __attribute__((__section__(".serial_client_config"))) serial_client_config_t ser
 __attribute__((__section__(".blk_client_config"))) blk_client_config_t blk_config;
 __attribute__((__section__(".net_client_config"))) net_client_config_t net_config;
 __attribute__((__section__(".vmm_config"))) vmm_config_t vmm_config;
+__attribute__((__section__(".virtio_vsock_transport_config"))) virtio_vsock_transport_config_t vsock_config;
 
 /* sDDF data */
 serial_queue_handle_t serial_rx_queue;
@@ -31,10 +33,13 @@ blk_queue_handle_t blk_queue;
 net_queue_handle_t net_rx_queue;
 net_queue_handle_t net_tx_queue;
 
+virtio_vsock_queue_handle_t vsock_queue;
+
 /* Bookkeeping structures for virtio devices */
 struct virtio_console_device virtio_console;
 struct virtio_blk_device virtio_blk;
 struct virtio_net_device virtio_net;
+struct virtio_vsock_device virtio_vsock;
 
 void init(void)
 {
@@ -42,6 +47,7 @@ void init(void)
     assert(blk_config_check_magic(&blk_config));
     assert(vmm_config_check_magic(&vmm_config));
     assert(net_config_check_magic(&net_config));
+    assert(virtio_vsock_transport_config_check_magic(&vsock_config));
 
     /* Initialise the VMM and the VCPU */
     LOG_VMM("starting \"%s\"\n", microkit_name);
@@ -72,6 +78,12 @@ void init(void)
                    net_config.tx.num_buffers);
     net_buffers_init(&net_tx_queue, 0);
 
+    /* Initialise the packet transport shared with the host vsock endpoint. */
+    virtio_vsock_connection_resource_t *vsock = &vsock_config.connection;
+    virtio_vsock_queue_init(&vsock_queue, vsock->tx_queue.vaddr, vsock->tx_data.vaddr,
+                            vsock->rx_queue.vaddr, vsock->rx_data.vaddr,
+                            vsock->capacity, vsock->buffer_size);
+
     if (!virtio_arch_init()) {
         LOG_VMM_ERR("Failed to initialise virtIO devices\n");
         return;
@@ -95,6 +107,8 @@ void notified(microkit_channel ch)
         virtio_blk_handle_resp(&virtio_blk);
     } else if (ch == net_config.rx.id) {
         virtio_net_handle_rx(&virtio_net);
+    } else if (ch == vsock_config.connection.id) {
+        virtio_vsock_handle_backend(&virtio_vsock);
     } else {
         LOG_VMM_ERR("Unexpected channel, ch: 0x%x\n", ch);
     }

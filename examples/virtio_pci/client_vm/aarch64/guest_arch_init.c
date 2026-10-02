@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <microkit.h>
 #include <libvmm/libvmm.h>
+#include <libvmm/virtio/vsock_config.h>
 #include <sddf/serial/queue.h>
 #include <sddf/serial/config.h>
 #include <sddf/blk/queue.h>
@@ -43,6 +44,9 @@ extern char _guest_initrd_image_end[];
 extern struct virtio_console_device virtio_console;
 extern struct virtio_blk_device virtio_blk;
 extern struct virtio_net_device virtio_net;
+extern struct virtio_vsock_device virtio_vsock;
+extern virtio_vsock_queue_handle_t vsock_queue;
+extern virtio_vsock_transport_config_t vsock_config;
 
 /* sDDF data */
 extern serial_queue_handle_t serial_rx_queue;
@@ -124,6 +128,12 @@ bool virtio_arch_init(void)
                              (uintptr_t)net_config.rx_data.vaddr, (uintptr_t)net_config.tx_data.vaddr, net_config.rx.id,
                              net_config.tx.id, net_config.mac_addr.addr, HAVE_CSUM_OFFLOAD)) {
         LOG_VMM_ERR("Failed to initialise virtIO PCI Network device\n");
+        return false;
+    }
+
+    if (!virtio_pci_vsock_init(&virtio_vsock, 0, 3, ARM_GIC_IRQ_ROUTE(GUEST_BOOT_VCPU_ID, 51),
+                               &vsock_queue, vsock_config.connection.id, 3)) {
+        LOG_VMM_ERR("Failed to initialise virtIO PCI vsock device\n");
         return false;
     }
 
