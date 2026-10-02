@@ -50,13 +50,16 @@ REPORT_FILE := $(BUILD_DIR)/report.txt
 SOURCE_GUEST_OUT ?= $(BUILD_DIR)/source_guest
 SOURCE_GUEST_LINUX := $(abspath $(SOURCE_GUEST_OUT)/linux/arch/arm64/boot/Image)
 SOURCE_GUEST_INITRD := $(abspath $(SOURCE_GUEST_OUT)/rootfs.cpio.gz)
+SOURCE_GUEST_KUBECONFIG := $(abspath $(SOURCE_GUEST_OUT)/credentials/kubelet.conf)
+KIND_CONTROL_PLANE ?= libvmm-poc-control-plane
+KUBELET_NODE_NAME ?= sel4-worker
 
 all: $(IMAGE_FILE)
 
 qemu $(IMAGE_FILE) $(REPORT_FILE) clean clobber: $(BUILD_DIR)/Makefile FORCE
 	$(MAKE) -C $(BUILD_DIR) MICROKIT_SDK=$(MICROKIT_SDK) $(notdir $@)
 
-.PHONY: source-guest source-kubelet source-build source-qemu
+.PHONY: source-guest source-kubelet kubelet-credentials source-poc-build source-poc-qemu source-build source-qemu
 
 # Build the aarch64 Linux guest and BusyBox initramfs from source.  LINUX_SRC
 # and BUSYBOX_SRC may be overridden to use any compatible source checkout.
@@ -66,6 +69,25 @@ source-guest:
 # Download the pinned Go/Kubernetes sources and build only the arm64 kubelet.
 source-kubelet:
 	$(MAKE) -C guest OUT=$(abspath $(SOURCE_GUEST_OUT)) kubelet
+
+kubelet-credentials: $(SOURCE_GUEST_KUBECONFIG)
+
+$(SOURCE_GUEST_KUBECONFIG):
+	mkdir -p $(dir $@)
+	docker exec $(KIND_CONTROL_PLANE) kubeadm kubeconfig user \
+		--client-name=system:node:$(KUBELET_NODE_NAME) --org=system:nodes \
+		--validity-period=8760h > $@.tmp
+	sed -i 's#server: .*#server: https://10.0.2.2:6443#' $@.tmp
+	# The minimal guest has no RTC yet, so it cannot validate certificate dates.
+	sed -i '/certificate-authority-data:/c\    insecure-skip-tls-verify: true' $@.tmp
+	chmod 0600 $@.tmp
+	mv $@.tmp $@
+
+source-poc-build: kubelet-credentials
+	$(MAKE) source-build MICROKIT_BOARD=$(MICROKIT_BOARD) MICROKIT_SDK=$(MICROKIT_SDK) BUILD_DIR=$(BUILD_DIR)
+
+source-poc-qemu: kubelet-credentials
+	$(MAKE) source-qemu MICROKIT_BOARD=$(MICROKIT_BOARD) MICROKIT_SDK=$(MICROKIT_SDK) BUILD_DIR=$(BUILD_DIR)
 
 source-build: source-guest
 	$(MAKE) MICROKIT_BOARD=$(MICROKIT_BOARD) MICROKIT_SDK=$(MICROKIT_SDK) \

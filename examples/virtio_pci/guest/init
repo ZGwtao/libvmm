@@ -1,5 +1,10 @@
 #!/bin/busybox sh
 
+# The kernel starts init with no PATH. BusyBox can resolve its own applets from
+# the shell, but child processes such as kubelet use exec.LookPath and require
+# an exported search path (for example, to invoke mount for projected volumes).
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
 mount -t devtmpfs devtmpfs /dev
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
@@ -7,11 +12,14 @@ mkdir -p /sys/fs/cgroup
 mount -t cgroup2 cgroup2 /sys/fs/cgroup || echo "warning: could not mount cgroup v2"
 
 echo "sel4-worker" > /etc/hostname
+echo "127.0.0.1 localhost sel4-worker" > /etc/hosts
+echo "::1 localhost" >> /etc/hosts
 echo "nameserver 10.0.2.3" > /etc/resolv.conf
 
 echo "source-built virtio_pci guest"
 
 /bin/vsock-shim &
+/bin/cri-stub &
 
 for script in /etc/init.d/S99*; do
     test -x "$script" || continue
@@ -26,5 +34,19 @@ for script in /etc/init.d/S99*; do
             ;;
     esac
 done
+
+# Mount local filesystems before kubelet starts. cAdvisor builds and caches its
+# filesystem inventory during kubelet initialization, so late mounts cannot be
+# used as CRI image filesystems even when they are otherwise valid ext4 mounts.
+if test -f /etc/kubernetes/kubelet.conf; then
+    /bin/kubelet \
+        --config=/etc/kubelet-config.yaml \
+        --kubeconfig=/etc/kubernetes/kubelet.conf \
+        --hostname-override=sel4-worker \
+        --node-ip=10.0.2.15 \
+        --root-dir=/var/lib/kubelet &
+else
+    echo "kubelet credentials not installed; kubelet not started"
+fi
 
 exec setsid cttyhack /bin/sh

@@ -13,7 +13,9 @@ clusterDNS:
 clusterDomain: cluster.local
 containerRuntimeEndpoint: unix:///run/cri-vsock.sock
 failSwapOn: false
-healthzBindAddress: 127.0.0.1
+healthzBindAddress: 0.0.0.0
+evictionHard: {}
+localStorageCapacityIsolation: false
 readOnlyPort: 0
 rotateCertificates: false
 serializeImagePulls: false

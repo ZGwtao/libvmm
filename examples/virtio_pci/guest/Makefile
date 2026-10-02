@@ -37,8 +37,11 @@ GO_STAMP := $(GO_ROOT)/.installed
 KUBERNETES_SRC := $(OUT)/src/kubernetes-$(KUBERNETES_VERSION)
 KUBERNETES_SRC_STAMP := $(KUBERNETES_SRC)/.extracted
 KUBELET := $(OUT)/kubelet
+CRI_STUB := $(OUT)/cri-stub
+KUBELET_KUBECONFIG ?= $(OUT)/credentials/kubelet.conf
+KUBELET_CREDENTIAL_DEP := $(wildcard $(KUBELET_KUBECONFIG))
 
-.PHONY: all kernel rootfs kubelet check-sources clean
+.PHONY: all kernel rootfs kubelet cri-stub check-sources clean
 
 all: kernel rootfs
 
@@ -74,6 +77,8 @@ $(BUSYBOX_OUT)/busybox: $(BUSYBOX_OUT)/.config
 rootfs: $(INITRAMFS)
 
 kubelet: $(KUBELET)
+
+cri-stub: $(CRI_STUB)
 
 $(DOWNLOADS)/$(GO_ARCHIVE):
 	mkdir -p $(DOWNLOADS)
@@ -112,6 +117,17 @@ $(KUBELET): $(GO_STAMP) $(KUBERNETES_SRC_STAMP) Makefile
 		-o $@ ./cmd/kubelet
 	file $@
 
+$(CRI_STUB): $(GO_STAMP) $(KUBERNETES_SRC_STAMP) cri_stub.go Makefile
+	mkdir -p $(KUBERNETES_SRC)/_output/libvmm-cri-stub $(OUT)/go-cache $(OUT)/go-mod-cache
+	cp cri_stub.go $(KUBERNETES_SRC)/_output/libvmm-cri-stub/main.go
+	cd $(KUBERNETES_SRC) && \
+		PATH=$(GO_ROOT)/bin:$$PATH \
+		GOCACHE=$(OUT)/go-cache GOMODCACHE=$(OUT)/go-mod-cache \
+		GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOTOOLCHAIN=local \
+		$(GO) build -mod=vendor -trimpath -ldflags='-s -w' \
+		-o $@ ./_output/libvmm-cri-stub
+	file $@
+
 $(VSOCK_SHIM): vsock_shim.c
 	mkdir -p $(OUT)
 	$(CROSS_COMPILE)gcc -static -O2 -Wall -Wextra -o $@ $<
@@ -120,15 +136,24 @@ $(UDS_CLIENT): uds_client.c
 	mkdir -p $(OUT)
 	$(CROSS_COMPILE)gcc -static -O2 -Wall -Wextra -o $@ $<
 
-$(INITRAMFS): $(BUSYBOX_OUT)/busybox $(VSOCK_SHIM) $(UDS_CLIENT) $(KUBELET) init Makefile busybox.fragment kubelet-config.yaml
-	mkdir -p $(ROOTFS)/bin $(ROOTFS)/dev $(ROOTFS)/etc/init.d $(ROOTFS)/mnt $(ROOTFS)/proc $(ROOTFS)/run $(ROOTFS)/sys $(ROOTFS)/tmp $(ROOTFS)/usr/share/udhcpc
+$(INITRAMFS): $(BUSYBOX_OUT)/busybox $(VSOCK_SHIM) $(UDS_CLIENT) $(KUBELET) $(CRI_STUB) $(KUBELET_CREDENTIAL_DEP) init Makefile busybox.fragment kubelet-config.yaml passwd group
+	mkdir -p $(ROOTFS)/bin $(ROOTFS)/dev $(ROOTFS)/etc/init.d $(ROOTFS)/etc/kubernetes/manifests $(ROOTFS)/mnt $(ROOTFS)/proc $(ROOTFS)/run $(ROOTFS)/sys $(ROOTFS)/tmp $(ROOTFS)/usr/share/udhcpc $(ROOTFS)/var/lib/kubelet $(ROOTFS)/var/log/pods
 	$(MAKE) -C $(BUSYBOX_SRC) O=$(BUSYBOX_OUT) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) CONFIG_PREFIX=$(ROOTFS) install
 	install -m 0755 init $(ROOTFS)/init
 	$(RM) $(ROOTFS)/bin/vsock-hello
 	install -m 0755 $(VSOCK_SHIM) $(ROOTFS)/bin/vsock-shim
 	install -m 0755 $(UDS_CLIENT) $(ROOTFS)/bin/uds-client
 	install -m 0755 $(KUBELET) $(ROOTFS)/bin/kubelet
+	install -m 0755 $(CRI_STUB) $(ROOTFS)/bin/cri-stub
 	install -m 0644 kubelet-config.yaml $(ROOTFS)/etc/kubelet-config.yaml
+	install -m 0644 passwd $(ROOTFS)/etc/passwd
+	install -m 0644 group $(ROOTFS)/etc/group
+	@if test -f "$(KUBELET_KUBECONFIG)"; then \
+		install -m 0600 "$(KUBELET_KUBECONFIG)" $(ROOTFS)/etc/kubernetes/kubelet.conf; \
+	else \
+		rm -f $(ROOTFS)/etc/kubernetes/kubelet.conf; \
+		echo "note: building without kubelet credentials"; \
+	fi
 	install -m 0755 $(BUSYBOX_SRC)/examples/udhcp/simple.script $(ROOTFS)/usr/share/udhcpc/default.script
 	cd $(ROOTFS) && find . -print0 | cpio --null -o --format=newc | gzip -9 > $(INITRAMFS)
 
