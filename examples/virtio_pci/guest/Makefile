@@ -28,8 +28,6 @@ BUSYBOX_OUT := $(OUT)/busybox
 ROOTFS := $(OUT)/rootfs
 IMAGE := $(LINUX_OUT)/arch/arm64/boot/Image
 INITRAMFS := $(OUT)/rootfs.cpio.gz
-VSOCK_SHIM := $(OUT)/vsock-shim
-UDS_CLIENT := $(OUT)/uds-client
 DOWNLOADS := $(OUT)/downloads
 GO_ROOT := $(OUT)/toolchain/go
 GO := $(GO_ROOT)/bin/go
@@ -128,21 +126,12 @@ $(CRI_STUB): $(GO_STAMP) $(KUBERNETES_SRC_STAMP) cri_stub.go Makefile
 		-o $@ ./_output/libvmm-cri-stub
 	file $@
 
-$(VSOCK_SHIM): vsock_shim.c
-	mkdir -p $(OUT)
-	$(CROSS_COMPILE)gcc -static -O2 -Wall -Wextra -o $@ $<
-
-$(UDS_CLIENT): uds_client.c
-	mkdir -p $(OUT)
-	$(CROSS_COMPILE)gcc -static -O2 -Wall -Wextra -o $@ $<
-
-$(INITRAMFS): $(BUSYBOX_OUT)/busybox $(VSOCK_SHIM) $(UDS_CLIENT) $(KUBELET) $(CRI_STUB) $(KUBELET_CREDENTIAL_DEP) init Makefile busybox.fragment kubelet-config.yaml passwd group
+$(INITRAMFS): $(BUSYBOX_OUT)/busybox $(KUBELET) $(CRI_STUB) $(KUBELET_CREDENTIAL_DEP) init Makefile busybox.fragment kubelet-config.yaml passwd group
 	mkdir -p $(ROOTFS)/bin $(ROOTFS)/dev $(ROOTFS)/etc/init.d $(ROOTFS)/etc/kubernetes/manifests $(ROOTFS)/mnt $(ROOTFS)/proc $(ROOTFS)/run $(ROOTFS)/sys $(ROOTFS)/tmp $(ROOTFS)/usr/share/udhcpc $(ROOTFS)/var/lib/kubelet $(ROOTFS)/var/log/pods
 	$(MAKE) -C $(BUSYBOX_SRC) O=$(BUSYBOX_OUT) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) CONFIG_PREFIX=$(ROOTFS) install
 	install -m 0755 init $(ROOTFS)/init
 	$(RM) $(ROOTFS)/bin/vsock-hello
-	install -m 0755 $(VSOCK_SHIM) $(ROOTFS)/bin/vsock-shim
-	install -m 0755 $(UDS_CLIENT) $(ROOTFS)/bin/uds-client
+	$(RM) $(ROOTFS)/bin/vsock-shim $(ROOTFS)/bin/uds-client
 	install -m 0755 $(KUBELET) $(ROOTFS)/bin/kubelet
 	install -m 0755 $(CRI_STUB) $(ROOTFS)/bin/cri-stub
 	install -m 0644 kubelet-config.yaml $(ROOTFS)/etc/kubelet-config.yaml

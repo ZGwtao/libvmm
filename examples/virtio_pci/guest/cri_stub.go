@@ -1,13 +1,13 @@
 // Copyright 2026
 // SPDX-License-Identifier: BSD-2-Clause
-
-// cri-stub provides an in-memory CRI v1 lifecycle implementation for a kubelet
-// proof of concept. Operations succeed with dummy objects; no workload is run.
+// CRI v1 to the host-native lifecycle protocol over AF_VSOCK.
 package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,281 +15,496 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-const socketPath = "/run/cri-vsock.sock"
+const (
+	socketPath        = "/run/cri-vsock.sock"
+	rpcMagic          = 0x4352564d
+	rpcVersion        = 1
+	hostCID           = 2
+	hostPort          = 1234
+	opHello           = 1
+	opRunSandbox      = 10
+	opStopSandbox     = 11
+	opRemoveSandbox   = 12
+	opSandboxStatus   = 13
+	opListSandboxes   = 14
+	opCreateContainer = 20
+	opStartContainer  = 21
+	opStopContainer   = 22
+	opRemoveContainer = 23
+	opContainerStatus = 24
+	opListContainers  = 25
+	opReopenLog       = 26
+	opPullImage       = 30
+	opRemoveImage     = 31
+	opImageStatus     = 32
+	opListImages      = 33
+	rpcOK             = 0
+	rpcNotFound       = 1
+	rpcInvalid        = 2
+	rpcFull           = 3
+)
+
+type wireObject struct {
+	Cursor, Present, Attempt, State, ExitCode                               uint32
+	NetworkNS, IPCNS, PIDNS                                                 uint32
+	CreatedAt, StartedAt, FinishedAt                                        uint64
+	ID, Name, Namespace, UID                                                string
+	Labels, Annotations                                                     map[string]string
+	RuntimeHandler, LogDir, SandboxID, Image, ImageRef, LogPath, Reason, IP string
+}
+
+var fieldSizes = []int{64, 128, 64, 64, 512, 512, 64, 192, 64, 256, 256, 192, 64, 48}
+
+func putFixed(dst []byte, s string) {
+	if len(dst) > 0 {
+		copy(dst[:len(dst)-1], []byte(s))
+	}
+}
+func getFixed(src []byte) string {
+	for i, b := range src {
+		if b == 0 {
+			return string(src[:i])
+		}
+	}
+	return string(src)
+}
+func encodeMap(m map[string]string, dst []byte) {
+	p := 2
+	count := 0
+	for k, v := range m {
+		if len(k) > 65535 || len(v) > 65535 || p+4+len(k)+len(v) > len(dst) {
+			continue
+		}
+		binary.LittleEndian.PutUint16(dst[p:], uint16(len(k)))
+		binary.LittleEndian.PutUint16(dst[p+2:], uint16(len(v)))
+		p += 4
+		copy(dst[p:], k)
+		p += len(k)
+		copy(dst[p:], v)
+		p += len(v)
+		count++
+	}
+	binary.LittleEndian.PutUint16(dst, uint16(count))
+}
+func decodeMap(src []byte) map[string]string {
+	m := map[string]string{}
+	if len(src) < 2 {
+		return m
+	}
+	n, p := int(binary.LittleEndian.Uint16(src)), 2
+	for i := 0; i < n && p+4 <= len(src); i++ {
+		kl := int(binary.LittleEndian.Uint16(src[p:]))
+		vl := int(binary.LittleEndian.Uint16(src[p+2:]))
+		p += 4
+		if p+kl+vl > len(src) {
+			break
+		}
+		k := string(src[p : p+kl])
+		p += kl
+		m[k] = string(src[p : p+vl])
+		p += vl
+	}
+	return m
+}
+
+func (o *wireObject) marshal() []byte {
+	b := make([]byte, 2536)
+	p := 0
+	for _, v := range []uint32{o.Cursor, o.Present, o.Attempt, o.State, o.ExitCode} {
+		binary.LittleEndian.PutUint32(b[p:], v)
+		p += 4
+	}
+	for _, v := range []uint32{o.NetworkNS, o.IPCNS, o.PIDNS} {
+		binary.LittleEndian.PutUint32(b[p:], v)
+		p += 4
+	}
+	for _, v := range []uint64{o.CreatedAt, o.StartedAt, o.FinishedAt} {
+		binary.LittleEndian.PutUint64(b[p:], v)
+		p += 8
+	}
+	strings := []string{o.ID, o.Name, o.Namespace, o.UID}
+	for i, s := range strings {
+		putFixed(b[p:p+fieldSizes[i]], s)
+		p += fieldSizes[i]
+	}
+	encodeMap(o.Labels, b[p:p+512])
+	p += 512
+	encodeMap(o.Annotations, b[p:p+512])
+	p += 512
+	strings = []string{o.RuntimeHandler, o.LogDir, o.SandboxID, o.Image, o.ImageRef, o.LogPath, o.Reason, o.IP}
+	for i, s := range strings {
+		n := fieldSizes[i+6]
+		putFixed(b[p:p+n], s)
+		p += n
+	}
+	return b
+}
+func unmarshalObject(b []byte) wireObject {
+	var o wireObject
+	p := 0
+	nums := []*uint32{&o.Cursor, &o.Present, &o.Attempt, &o.State, &o.ExitCode}
+	for _, v := range nums {
+		*v = binary.LittleEndian.Uint32(b[p:])
+		p += 4
+	}
+	for _, v := range []*uint32{&o.NetworkNS, &o.IPCNS, &o.PIDNS} {
+		*v = binary.LittleEndian.Uint32(b[p:])
+		p += 4
+	}
+	times := []*uint64{&o.CreatedAt, &o.StartedAt, &o.FinishedAt}
+	for _, v := range times {
+		*v = binary.LittleEndian.Uint64(b[p:])
+		p += 8
+	}
+	ss := []*string{&o.ID, &o.Name, &o.Namespace, &o.UID}
+	for i, v := range ss {
+		n := fieldSizes[i]
+		*v = getFixed(b[p : p+n])
+		p += n
+	}
+	o.Labels = decodeMap(b[p : p+512])
+	p += 512
+	o.Annotations = decodeMap(b[p : p+512])
+	p += 512
+	ss = []*string{&o.RuntimeHandler, &o.LogDir, &o.SandboxID, &o.Image, &o.ImageRef, &o.LogPath, &o.Reason, &o.IP}
+	for i, v := range ss {
+		n := fieldSizes[i+6]
+		*v = getFixed(b[p : p+n])
+		p += n
+	}
+	return o
+}
+
+type hostClient struct {
+	mu   sync.Mutex
+	fd   int
+	next atomic.Uint32
+}
+
+func (c *hostClient) close() {
+	if c.fd >= 0 {
+		_ = unix.Close(c.fd)
+		c.fd = -1
+	}
+}
+func (c *hostClient) connect() error {
+	if c.fd >= 0 {
+		return nil
+	}
+	fd, e := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+	if e != nil {
+		return e
+	}
+	if e = unix.Connect(fd, &unix.SockaddrVM{CID: hostCID, Port: hostPort}); e != nil {
+		unix.Close(fd)
+		return e
+	}
+	c.fd = fd
+	return nil
+}
+func fdWrite(fd int, b []byte) error {
+	for len(b) > 0 {
+		n, e := unix.Write(fd, b)
+		if e == unix.EINTR {
+			continue
+		}
+		if e != nil {
+			return e
+		}
+		if n == 0 {
+			return io.ErrUnexpectedEOF
+		}
+		b = b[n:]
+	}
+	return nil
+}
+func fdRead(fd int, b []byte) error {
+	for len(b) > 0 {
+		n, e := unix.Read(fd, b)
+		if e == unix.EINTR {
+			continue
+		}
+		if e != nil {
+			return e
+		}
+		if n == 0 {
+			return io.EOF
+		}
+		b = b[n:]
+	}
+	return nil
+}
+func (c *hostClient) call(op uint16, req wireObject) (wireObject, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e := c.connect(); e != nil {
+		return wireObject{}, status.Errorf(codes.Unavailable, "host runtime connect: %v", e)
+	}
+	body := req.marshal()
+	h := make([]byte, 20)
+	binary.LittleEndian.PutUint32(h, rpcMagic)
+	binary.LittleEndian.PutUint16(h[4:], rpcVersion)
+	binary.LittleEndian.PutUint16(h[6:], op)
+	binary.LittleEndian.PutUint32(h[8:], c.next.Add(1))
+	binary.LittleEndian.PutUint32(h[16:], uint32(len(body)))
+	e := fdWrite(c.fd, h)
+	if e == nil {
+		e = fdWrite(c.fd, body)
+	}
+	if e == nil {
+		e = fdRead(c.fd, h)
+	}
+	if e != nil {
+		c.close()
+		return wireObject{}, status.Errorf(codes.Unavailable, "host runtime transport: %v", e)
+	}
+	if binary.LittleEndian.Uint32(h) != rpcMagic || binary.LittleEndian.Uint32(h[16:]) != uint32(len(body)) {
+		c.close()
+		return wireObject{}, status.Error(codes.Internal, "invalid host runtime response")
+	}
+	if e := fdRead(c.fd, body); e != nil {
+		c.close()
+		return wireObject{}, status.Errorf(codes.Unavailable, "host runtime response: %v", e)
+	}
+	s := binary.LittleEndian.Uint32(h[12:])
+	if s != rpcOK {
+		if s == rpcNotFound {
+			return wireObject{}, status.Error(codes.NotFound, "host object not found")
+		}
+		if s == rpcFull {
+			return wireObject{}, status.Error(codes.ResourceExhausted, "host object table full")
+		}
+		return wireObject{}, status.Error(codes.InvalidArgument, "host rejected request")
+	}
+	return unmarshalObject(body), nil
+}
+func (c *hostClient) list(op uint16) ([]wireObject, error) {
+	var out []wireObject
+	var cursor uint32
+	for cursor < 32 {
+		o, e := c.call(op, wireObject{Cursor: cursor})
+		if e != nil {
+			return nil, e
+		}
+		if o.Present == 0 {
+			break
+		}
+		out = append(out, o)
+		if o.Cursor <= cursor {
+			break
+		}
+		cursor = o.Cursor
+	}
+	return out, nil
+}
 
 type runtimeServer struct {
 	runtimeapi.UnimplementedRuntimeServiceServer
-	mu                 sync.RWMutex
-	sandboxes          map[string]*runtimeapi.PodSandboxStatus
-	sandboxLogDirs     map[string]string
-	containers         map[string]*runtimeapi.ContainerStatus
-	containerSandboxes map[string]string
-	nextID             atomic.Uint64
+	host *hostClient
+}
+type imageServer struct {
+	runtimeapi.UnimplementedImageServiceServer
+	host *hostClient
 }
 
-func newRuntimeServer() *runtimeServer {
-	return &runtimeServer{
-		sandboxes:          make(map[string]*runtimeapi.PodSandboxStatus),
-		sandboxLogDirs:     make(map[string]string),
-		containers:         make(map[string]*runtimeapi.ContainerStatus),
-		containerSandboxes: make(map[string]string),
-	}
+func meta(m *runtimeapi.PodSandboxMetadata) (string, string, string, uint32) {
+	return m.GetName(), m.GetNamespace(), m.GetUid(), m.GetAttempt()
 }
-func (s *runtimeServer) id(kind string) string {
-	return fmt.Sprintf("dummy-%s-%08x", kind, s.nextID.Add(1))
-}
-
-func (*runtimeServer) Version(_ context.Context, req *runtimeapi.VersionRequest) (*runtimeapi.VersionResponse, error) {
-	return &runtimeapi.VersionResponse{
-		Version:           req.Version,
-		RuntimeName:       "libvmm-cri-stub",
-		RuntimeVersion:    "0.1.0",
-		RuntimeApiVersion: "v1",
-	}, nil
-}
-
-func (*runtimeServer) Status(_ context.Context, _ *runtimeapi.StatusRequest) (*runtimeapi.StatusResponse, error) {
-	return &runtimeapi.StatusResponse{Status: &runtimeapi.RuntimeStatus{Conditions: []*runtimeapi.RuntimeCondition{
-		{Type: "RuntimeReady", Status: true, Reason: "DummyBackend", Message: "in-memory CRI lifecycle shim is ready"},
-		{Type: "NetworkReady", Status: true, Reason: "DummyBackend", Message: "dummy pod networking is ready"},
-	}}}, nil
-}
-
-func (*runtimeServer) RuntimeConfig(_ context.Context, _ *runtimeapi.RuntimeConfigRequest) (*runtimeapi.RuntimeConfigResponse, error) {
-	return &runtimeapi.RuntimeConfigResponse{Linux: &runtimeapi.LinuxRuntimeConfiguration{
-		CgroupDriver: runtimeapi.CgroupDriver_CGROUPFS,
-	}}, nil
-}
-
-func (*runtimeServer) UpdateRuntimeConfig(_ context.Context, _ *runtimeapi.UpdateRuntimeConfigRequest) (*runtimeapi.UpdateRuntimeConfigResponse, error) {
-	// Keep this a no-op until the native runtime bridge consumes PodCIDR data.
-	return &runtimeapi.UpdateRuntimeConfigResponse{}, nil
-}
-
-func (s *runtimeServer) RunPodSandbox(_ context.Context, req *runtimeapi.RunPodSandboxRequest) (*runtimeapi.RunPodSandboxResponse, error) {
-	id, config := s.id("sandbox"), req.GetConfig()
-	namespaceOptions := config.GetLinux().GetSecurityContext().GetNamespaceOptions()
-	entry := &runtimeapi.PodSandboxStatus{
-		Id: id, Metadata: config.GetMetadata(), State: runtimeapi.PodSandboxState_SANDBOX_READY,
-		CreatedAt: time.Now().UnixNano(), Network: &runtimeapi.PodSandboxNetworkStatus{Ip: "192.0.2.1"},
-		Linux:  &runtimeapi.LinuxPodSandboxStatus{Namespaces: &runtimeapi.Namespace{Options: namespaceOptions}},
-		Labels: config.GetLabels(), Annotations: config.GetAnnotations(), RuntimeHandler: req.GetRuntimeHandler(),
-	}
-	s.mu.Lock()
-	s.sandboxes[id] = entry
-	s.sandboxLogDirs[id] = config.GetLogDirectory()
-	s.mu.Unlock()
-	fmt.Printf("cri-shim: RunPodSandbox name=%s namespace=%s id=%s\n", entry.Metadata.GetName(), entry.Metadata.GetNamespace(), id)
-	return &runtimeapi.RunPodSandboxResponse{PodSandboxId: id}, nil
-}
-
-func (s *runtimeServer) StopPodSandbox(_ context.Context, req *runtimeapi.StopPodSandboxRequest) (*runtimeapi.StopPodSandboxResponse, error) {
-	s.mu.Lock()
-	if e := s.sandboxes[req.GetPodSandboxId()]; e != nil {
-		e.State = runtimeapi.PodSandboxState_SANDBOX_NOTREADY
-	}
-	s.mu.Unlock()
-	return &runtimeapi.StopPodSandboxResponse{}, nil
-}
-func (s *runtimeServer) RemovePodSandbox(_ context.Context, req *runtimeapi.RemovePodSandboxRequest) (*runtimeapi.RemovePodSandboxResponse, error) {
-	s.mu.Lock()
-	delete(s.sandboxes, req.GetPodSandboxId())
-	delete(s.sandboxLogDirs, req.GetPodSandboxId())
-	s.mu.Unlock()
-	return &runtimeapi.RemovePodSandboxResponse{}, nil
-}
-func (s *runtimeServer) PodSandboxStatus(_ context.Context, req *runtimeapi.PodSandboxStatusRequest) (*runtimeapi.PodSandboxStatusResponse, error) {
-	s.mu.RLock()
-	e := s.sandboxes[req.GetPodSandboxId()]
-	s.mu.RUnlock()
-	if e == nil {
-		return nil, status.Error(codes.NotFound, "dummy sandbox not found")
-	}
-	return &runtimeapi.PodSandboxStatusResponse{Status: e}, nil
-}
-func labelsMatch(labels, selector map[string]string) bool {
-	for key, value := range selector {
-		if labels[key] != value {
+func cmeta(m *runtimeapi.ContainerMetadata) (string, uint32) { return m.GetName(), m.GetAttempt() }
+func labelsMatch(have, want map[string]string) bool {
+	for k, v := range want {
+		if have[k] != v {
 			return false
 		}
 	}
 	return true
 }
 
-func (s *runtimeServer) ListPodSandbox(_ context.Context, req *runtimeapi.ListPodSandboxRequest) (*runtimeapi.ListPodSandboxResponse, error) {
-	filter := req.GetFilter()
-	s.mu.RLock()
-	items := make([]*runtimeapi.PodSandbox, 0, len(s.sandboxes))
-	for _, e := range s.sandboxes {
-		if filter != nil && (filter.GetId() != "" && filter.GetId() != e.Id ||
-			filter.GetState() != nil && filter.GetState().GetState() != e.State ||
-			!labelsMatch(e.Labels, filter.GetLabelSelector())) {
-			continue
-		}
-		items = append(items, &runtimeapi.PodSandbox{Id: e.Id, Metadata: e.Metadata, State: e.State, CreatedAt: e.CreatedAt, Labels: e.Labels, Annotations: e.Annotations, RuntimeHandler: e.RuntimeHandler})
-	}
-	s.mu.RUnlock()
-	return &runtimeapi.ListPodSandboxResponse{Items: items}, nil
+func (s *runtimeServer) Version(_ context.Context, r *runtimeapi.VersionRequest) (*runtimeapi.VersionResponse, error) {
+	return &runtimeapi.VersionResponse{Version: r.Version, RuntimeName: "libvmm-host-runtime", RuntimeVersion: "0.2.0", RuntimeApiVersion: "v1"}, nil
 }
-func (s *runtimeServer) CreateContainer(_ context.Context, req *runtimeapi.CreateContainerRequest) (*runtimeapi.CreateContainerResponse, error) {
-	id, config := s.id("container"), req.GetConfig()
-	imageRef := "dummy-image://" + config.GetImage().GetImage()
-	s.mu.RLock()
-	logPath := filepath.Join(s.sandboxLogDirs[req.GetPodSandboxId()], config.GetLogPath())
-	s.mu.RUnlock()
-	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
-		return nil, status.Errorf(codes.Internal, "create dummy log directory: %v", err)
+func (s *runtimeServer) Status(_ context.Context, _ *runtimeapi.StatusRequest) (*runtimeapi.StatusResponse, error) {
+	if _, e := s.host.call(opHello, wireObject{}); e != nil {
+		return nil, e
 	}
-	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err != nil {
-		return nil, status.Errorf(codes.Internal, "create dummy container log: %v", err)
-	} else {
-		_ = f.Close()
-	}
-	e := &runtimeapi.ContainerStatus{Id: id, Metadata: config.GetMetadata(), State: runtimeapi.ContainerState_CONTAINER_CREATED, CreatedAt: time.Now().UnixNano(), Image: config.GetImage(), ImageRef: imageRef, ImageId: imageRef, Labels: config.GetLabels(), Annotations: config.GetAnnotations(), Mounts: config.GetMounts(), LogPath: logPath, Reason: "DummyCreated"}
-	s.mu.Lock()
-	s.containers[id] = e
-	s.containerSandboxes[id] = req.GetPodSandboxId()
-	s.mu.Unlock()
-	fmt.Printf("cri-shim: CreateContainer name=%s sandbox=%s id=%s\n", e.Metadata.GetName(), req.GetPodSandboxId(), id)
-	return &runtimeapi.CreateContainerResponse{ContainerId: id}, nil
+	return &runtimeapi.StatusResponse{Status: &runtimeapi.RuntimeStatus{Conditions: []*runtimeapi.RuntimeCondition{{Type: "RuntimeReady", Status: true, Reason: "HostRuntimeReady"}, {Type: "NetworkReady", Status: true, Reason: "DummyNetworkReady"}}}}, nil
 }
-func (s *runtimeServer) StartContainer(_ context.Context, req *runtimeapi.StartContainerRequest) (*runtimeapi.StartContainerResponse, error) {
-	s.mu.Lock()
-	e := s.containers[req.GetContainerId()]
+func (*runtimeServer) RuntimeConfig(context.Context, *runtimeapi.RuntimeConfigRequest) (*runtimeapi.RuntimeConfigResponse, error) {
+	return &runtimeapi.RuntimeConfigResponse{Linux: &runtimeapi.LinuxRuntimeConfiguration{CgroupDriver: runtimeapi.CgroupDriver_CGROUPFS}}, nil
+}
+func (*runtimeServer) UpdateRuntimeConfig(context.Context, *runtimeapi.UpdateRuntimeConfigRequest) (*runtimeapi.UpdateRuntimeConfigResponse, error) {
+	return &runtimeapi.UpdateRuntimeConfigResponse{}, nil
+}
+func (s *runtimeServer) RunPodSandbox(_ context.Context, r *runtimeapi.RunPodSandboxRequest) (*runtimeapi.RunPodSandboxResponse, error) {
+	n, ns, uid, a := meta(r.GetConfig().GetMetadata())
+	nso := r.GetConfig().GetLinux().GetSecurityContext().GetNamespaceOptions()
+	o, e := s.host.call(opRunSandbox, wireObject{Name: n, Namespace: ns, UID: uid, Attempt: a, NetworkNS: uint32(nso.GetNetwork()), IPCNS: uint32(nso.GetIpc()), PIDNS: uint32(nso.GetPid()), Labels: r.GetConfig().GetLabels(), Annotations: r.GetConfig().GetAnnotations(), RuntimeHandler: r.GetRuntimeHandler(), LogDir: r.GetConfig().GetLogDirectory()})
 	if e != nil {
-		e.State, e.StartedAt, e.Reason = runtimeapi.ContainerState_CONTAINER_RUNNING, time.Now().UnixNano(), "DummyRunning"
+		return nil, e
 	}
-	s.mu.Unlock()
-	if e == nil {
-		return nil, status.Error(codes.NotFound, "dummy container not found")
+	return &runtimeapi.RunPodSandboxResponse{PodSandboxId: o.ID}, nil
+}
+func (s *runtimeServer) StopPodSandbox(_ context.Context, r *runtimeapi.StopPodSandboxRequest) (*runtimeapi.StopPodSandboxResponse, error) {
+	_, e := s.host.call(opStopSandbox, wireObject{ID: r.GetPodSandboxId()})
+	return &runtimeapi.StopPodSandboxResponse{}, e
+}
+func (s *runtimeServer) RemovePodSandbox(_ context.Context, r *runtimeapi.RemovePodSandboxRequest) (*runtimeapi.RemovePodSandboxResponse, error) {
+	_, e := s.host.call(opRemoveSandbox, wireObject{ID: r.GetPodSandboxId()})
+	return &runtimeapi.RemovePodSandboxResponse{}, e
+}
+func sandboxStatus(o wireObject) *runtimeapi.PodSandboxStatus {
+	nso := &runtimeapi.NamespaceOption{Network: runtimeapi.NamespaceMode(o.NetworkNS), Ipc: runtimeapi.NamespaceMode(o.IPCNS), Pid: runtimeapi.NamespaceMode(o.PIDNS)}
+	return &runtimeapi.PodSandboxStatus{Id: o.ID, Metadata: &runtimeapi.PodSandboxMetadata{Name: o.Name, Namespace: o.Namespace, Uid: o.UID, Attempt: o.Attempt}, State: runtimeapi.PodSandboxState(o.State), CreatedAt: int64(o.CreatedAt), Network: &runtimeapi.PodSandboxNetworkStatus{Ip: o.IP}, Linux: &runtimeapi.LinuxPodSandboxStatus{Namespaces: &runtimeapi.Namespace{Options: nso}}, Labels: o.Labels, Annotations: o.Annotations, RuntimeHandler: o.RuntimeHandler}
+}
+func (s *runtimeServer) PodSandboxStatus(_ context.Context, r *runtimeapi.PodSandboxStatusRequest) (*runtimeapi.PodSandboxStatusResponse, error) {
+	o, e := s.host.call(opSandboxStatus, wireObject{ID: r.GetPodSandboxId()})
+	if e != nil {
+		return nil, e
 	}
-	fmt.Printf("cri-shim: StartContainer id=%s\n", req.GetContainerId())
-	return &runtimeapi.StartContainerResponse{}, nil
+	return &runtimeapi.PodSandboxStatusResponse{Status: sandboxStatus(o)}, nil
 }
-func (s *runtimeServer) StopContainer(_ context.Context, req *runtimeapi.StopContainerRequest) (*runtimeapi.StopContainerResponse, error) {
-	s.mu.Lock()
-	if e := s.containers[req.GetContainerId()]; e != nil {
-		e.State, e.FinishedAt, e.Reason = runtimeapi.ContainerState_CONTAINER_EXITED, time.Now().UnixNano(), "DummyStopped"
+func (s *runtimeServer) ListPodSandbox(_ context.Context, r *runtimeapi.ListPodSandboxRequest) (*runtimeapi.ListPodSandboxResponse, error) {
+	os, e := s.host.list(opListSandboxes)
+	if e != nil {
+		return nil, e
 	}
-	s.mu.Unlock()
-	return &runtimeapi.StopContainerResponse{}, nil
-}
-func (s *runtimeServer) RemoveContainer(_ context.Context, req *runtimeapi.RemoveContainerRequest) (*runtimeapi.RemoveContainerResponse, error) {
-	s.mu.Lock()
-	delete(s.containers, req.GetContainerId())
-	delete(s.containerSandboxes, req.GetContainerId())
-	s.mu.Unlock()
-	return &runtimeapi.RemoveContainerResponse{}, nil
-}
-func (s *runtimeServer) ReopenContainerLog(_ context.Context, req *runtimeapi.ReopenContainerLogRequest) (*runtimeapi.ReopenContainerLogResponse, error) {
-	s.mu.RLock()
-	e := s.containers[req.GetContainerId()]
-	s.mu.RUnlock()
-	if e == nil {
-		return nil, status.Error(codes.NotFound, "dummy container not found")
-	}
-	return &runtimeapi.ReopenContainerLogResponse{}, nil
-}
-func (s *runtimeServer) ContainerStatus(_ context.Context, req *runtimeapi.ContainerStatusRequest) (*runtimeapi.ContainerStatusResponse, error) {
-	s.mu.RLock()
-	e := s.containers[req.GetContainerId()]
-	s.mu.RUnlock()
-	if e == nil {
-		return nil, status.Error(codes.NotFound, "dummy container not found")
-	}
-	return &runtimeapi.ContainerStatusResponse{Status: e}, nil
-}
-func (s *runtimeServer) ListContainers(_ context.Context, req *runtimeapi.ListContainersRequest) (*runtimeapi.ListContainersResponse, error) {
-	filter := req.GetFilter()
-	s.mu.RLock()
-	items := make([]*runtimeapi.Container, 0, len(s.containers))
-	for _, e := range s.containers {
-		sandboxID := s.containerSandboxes[e.Id]
-		if filter != nil && (filter.GetId() != "" && filter.GetId() != e.Id ||
-			filter.GetPodSandboxId() != "" && filter.GetPodSandboxId() != sandboxID ||
-			filter.GetState() != nil && filter.GetState().GetState() != e.State ||
-			!labelsMatch(e.Labels, filter.GetLabelSelector())) {
+	f := r.GetFilter()
+	out := []*runtimeapi.PodSandbox{}
+	for _, o := range os {
+		if f != nil && (f.GetId() != "" && f.GetId() != o.ID || f.GetState() != nil && uint32(f.GetState().GetState()) != o.State || !labelsMatch(o.Labels, f.GetLabelSelector())) {
 			continue
 		}
-		items = append(items, &runtimeapi.Container{Id: e.Id, PodSandboxId: sandboxID, Metadata: e.Metadata, State: e.State, CreatedAt: e.CreatedAt, Image: e.Image, ImageRef: e.ImageRef, Labels: e.Labels, Annotations: e.Annotations})
+		st := sandboxStatus(o)
+		out = append(out, &runtimeapi.PodSandbox{Id: st.Id, Metadata: st.Metadata, State: st.State, CreatedAt: st.CreatedAt, Labels: st.Labels, Annotations: st.Annotations, RuntimeHandler: st.RuntimeHandler})
 	}
-	s.mu.RUnlock()
-	return &runtimeapi.ListContainersResponse{Containers: items}, nil
+	return &runtimeapi.ListPodSandboxResponse{Items: out}, nil
 }
-
-type imageServer struct {
-	runtimeapi.UnimplementedImageServiceServer
-	mu     sync.RWMutex
-	images map[string]*runtimeapi.Image
-}
-
-func newImageServer() *imageServer { return &imageServer{images: make(map[string]*runtimeapi.Image)} }
-
-func (s *imageServer) ListImages(_ context.Context, _ *runtimeapi.ListImagesRequest) (*runtimeapi.ListImagesResponse, error) {
-	s.mu.RLock()
-	items := make([]*runtimeapi.Image, 0, len(s.images))
-	for _, e := range s.images {
-		items = append(items, e)
+func (s *runtimeServer) CreateContainer(_ context.Context, r *runtimeapi.CreateContainerRequest) (*runtimeapi.CreateContainerResponse, error) {
+	n, a := cmeta(r.GetConfig().GetMetadata())
+	sb, e := s.host.call(opSandboxStatus, wireObject{ID: r.GetPodSandboxId()})
+	if e != nil {
+		return nil, e
 	}
-	s.mu.RUnlock()
-	return &runtimeapi.ListImagesResponse{Images: items}, nil
+	lp := filepath.Join(sb.LogDir, r.GetConfig().GetLogPath())
+	if e = os.MkdirAll(filepath.Dir(lp), 0755); e != nil {
+		return nil, status.Errorf(codes.Internal, "create log dir: %v", e)
+	}
+	f, e := os.OpenFile(lp, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if e != nil {
+		return nil, status.Errorf(codes.Internal, "create log: %v", e)
+	}
+	f.Close()
+	o, e := s.host.call(opCreateContainer, wireObject{Name: n, Attempt: a, SandboxID: r.GetPodSandboxId(), Image: r.GetConfig().GetImage().GetImage(), Labels: r.GetConfig().GetLabels(), Annotations: r.GetConfig().GetAnnotations(), LogPath: lp})
+	if e != nil {
+		return nil, e
+	}
+	return &runtimeapi.CreateContainerResponse{ContainerId: o.ID}, nil
 }
-func (s *imageServer) PullImage(_ context.Context, req *runtimeapi.PullImageRequest) (*runtimeapi.PullImageResponse, error) {
-	name := req.GetImage().GetImage()
-	ref := "dummy-image://" + name
-	s.mu.Lock()
-	s.images[ref] = &runtimeapi.Image{Id: ref, RepoTags: []string{name}, Size: 1, Spec: req.GetImage()}
-	s.mu.Unlock()
-	fmt.Printf("cri-shim: PullImage image=%s ref=%s\n", name, ref)
-	return &runtimeapi.PullImageResponse{ImageRef: ref}, nil
+func (s *runtimeServer) StartContainer(_ context.Context, r *runtimeapi.StartContainerRequest) (*runtimeapi.StartContainerResponse, error) {
+	_, e := s.host.call(opStartContainer, wireObject{ID: r.GetContainerId()})
+	return &runtimeapi.StartContainerResponse{}, e
 }
-func (s *imageServer) ImageStatus(_ context.Context, req *runtimeapi.ImageStatusRequest) (*runtimeapi.ImageStatusResponse, error) {
-	ref := "dummy-image://" + req.GetImage().GetImage()
-	s.mu.RLock()
-	e := s.images[ref]
-	s.mu.RUnlock()
-	return &runtimeapi.ImageStatusResponse{Image: e}, nil
+func (s *runtimeServer) StopContainer(_ context.Context, r *runtimeapi.StopContainerRequest) (*runtimeapi.StopContainerResponse, error) {
+	_, e := s.host.call(opStopContainer, wireObject{ID: r.GetContainerId()})
+	return &runtimeapi.StopContainerResponse{}, e
 }
-func (s *imageServer) RemoveImage(_ context.Context, req *runtimeapi.RemoveImageRequest) (*runtimeapi.RemoveImageResponse, error) {
-	name := req.GetImage().GetImage()
-	s.mu.Lock()
-	delete(s.images, name)
-	delete(s.images, "dummy-image://"+name)
-	s.mu.Unlock()
-	return &runtimeapi.RemoveImageResponse{}, nil
+func (s *runtimeServer) RemoveContainer(_ context.Context, r *runtimeapi.RemoveContainerRequest) (*runtimeapi.RemoveContainerResponse, error) {
+	_, e := s.host.call(opRemoveContainer, wireObject{ID: r.GetContainerId()})
+	return &runtimeapi.RemoveContainerResponse{}, e
+}
+func (s *runtimeServer) ReopenContainerLog(_ context.Context, r *runtimeapi.ReopenContainerLogRequest) (*runtimeapi.ReopenContainerLogResponse, error) {
+	_, e := s.host.call(opReopenLog, wireObject{ID: r.GetContainerId()})
+	return &runtimeapi.ReopenContainerLogResponse{}, e
+}
+func containerStatus(o wireObject) *runtimeapi.ContainerStatus {
+	return &runtimeapi.ContainerStatus{Id: o.ID, Metadata: &runtimeapi.ContainerMetadata{Name: o.Name, Attempt: o.Attempt}, State: runtimeapi.ContainerState(o.State), CreatedAt: int64(o.CreatedAt), StartedAt: int64(o.StartedAt), FinishedAt: int64(o.FinishedAt), ExitCode: int32(o.ExitCode), Image: &runtimeapi.ImageSpec{Image: o.Image}, ImageRef: o.ImageRef, ImageId: o.ImageRef, Labels: o.Labels, Annotations: o.Annotations, LogPath: o.LogPath, Reason: o.Reason}
+}
+func (s *runtimeServer) ContainerStatus(_ context.Context, r *runtimeapi.ContainerStatusRequest) (*runtimeapi.ContainerStatusResponse, error) {
+	o, e := s.host.call(opContainerStatus, wireObject{ID: r.GetContainerId()})
+	if e != nil {
+		return nil, e
+	}
+	return &runtimeapi.ContainerStatusResponse{Status: containerStatus(o)}, nil
+}
+func (s *runtimeServer) ListContainers(_ context.Context, r *runtimeapi.ListContainersRequest) (*runtimeapi.ListContainersResponse, error) {
+	os, e := s.host.list(opListContainers)
+	if e != nil {
+		return nil, e
+	}
+	f := r.GetFilter()
+	out := []*runtimeapi.Container{}
+	for _, o := range os {
+		if f != nil && (f.GetId() != "" && f.GetId() != o.ID || f.GetPodSandboxId() != "" && f.GetPodSandboxId() != o.SandboxID || f.GetState() != nil && uint32(f.GetState().GetState()) != o.State || !labelsMatch(o.Labels, f.GetLabelSelector())) {
+			continue
+		}
+		out = append(out, &runtimeapi.Container{Id: o.ID, PodSandboxId: o.SandboxID, Metadata: &runtimeapi.ContainerMetadata{Name: o.Name, Attempt: o.Attempt}, State: runtimeapi.ContainerState(o.State), CreatedAt: int64(o.CreatedAt), Image: &runtimeapi.ImageSpec{Image: o.Image}, ImageRef: o.ImageRef, Labels: o.Labels, Annotations: o.Annotations})
+	}
+	return &runtimeapi.ListContainersResponse{Containers: out}, nil
 }
 
-func (*imageServer) ImageFsInfo(_ context.Context, _ *runtimeapi.ImageFsInfoRequest) (*runtimeapi.ImageFsInfoResponse, error) {
-	usage := &runtimeapi.FilesystemUsage{
-		Timestamp:  time.Now().UnixNano(),
-		FsId:       &runtimeapi.FilesystemIdentifier{Mountpoint: "/mnt"},
-		UsedBytes:  &runtimeapi.UInt64Value{Value: 0},
-		InodesUsed: &runtimeapi.UInt64Value{Value: 0},
+func (s *imageServer) PullImage(_ context.Context, r *runtimeapi.PullImageRequest) (*runtimeapi.PullImageResponse, error) {
+	o, e := s.host.call(opPullImage, wireObject{Image: r.GetImage().GetImage()})
+	if e != nil {
+		return nil, e
 	}
-	return &runtimeapi.ImageFsInfoResponse{ImageFilesystems: []*runtimeapi.FilesystemUsage{usage}}, nil
+	return &runtimeapi.PullImageResponse{ImageRef: o.ImageRef}, nil
+}
+func imageFrom(o wireObject) *runtimeapi.Image {
+	return &runtimeapi.Image{Id: o.ID, RepoTags: []string{o.Image}, Size: 1, Spec: &runtimeapi.ImageSpec{Image: o.Image}}
+}
+func (s *imageServer) ImageStatus(_ context.Context, r *runtimeapi.ImageStatusRequest) (*runtimeapi.ImageStatusResponse, error) {
+	name := r.GetImage().GetImage()
+	o, e := s.host.call(opImageStatus, wireObject{ID: name, Image: name})
+	if status.Code(e) == codes.NotFound {
+		return &runtimeapi.ImageStatusResponse{}, nil
+	}
+	if e != nil {
+		return nil, e
+	}
+	return &runtimeapi.ImageStatusResponse{Image: imageFrom(o)}, nil
+}
+func (s *imageServer) ListImages(context.Context, *runtimeapi.ListImagesRequest) (*runtimeapi.ListImagesResponse, error) {
+	os, e := s.host.list(opListImages)
+	if e != nil {
+		return nil, e
+	}
+	out := make([]*runtimeapi.Image, 0, len(os))
+	for _, o := range os {
+		out = append(out, imageFrom(o))
+	}
+	return &runtimeapi.ListImagesResponse{Images: out}, nil
+}
+func (s *imageServer) RemoveImage(_ context.Context, r *runtimeapi.RemoveImageRequest) (*runtimeapi.RemoveImageResponse, error) {
+	name := r.GetImage().GetImage()
+	_, e := s.host.call(opRemoveImage, wireObject{ID: name, Image: name})
+	return &runtimeapi.RemoveImageResponse{}, e
+}
+func (*imageServer) ImageFsInfo(context.Context, *runtimeapi.ImageFsInfoRequest) (*runtimeapi.ImageFsInfoResponse, error) {
+	u := &runtimeapi.FilesystemUsage{Timestamp: time.Now().UnixNano(), FsId: &runtimeapi.FilesystemIdentifier{Mountpoint: "/mnt"}, UsedBytes: &runtimeapi.UInt64Value{}, InodesUsed: &runtimeapi.UInt64Value{}}
+	return &runtimeapi.ImageFsInfoResponse{ImageFilesystems: []*runtimeapi.FilesystemUsage{u}}, nil
 }
 
 func main() {
-	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-		panic(err)
+	if e := os.Remove(socketPath); e != nil && !os.IsNotExist(e) {
+		panic(e)
 	}
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		panic(err)
+	l, e := net.Listen("unix", socketPath)
+	if e != nil {
+		panic(e)
 	}
-
+	host := &hostClient{fd: -1}
 	server := grpc.NewServer()
-	runtimeapi.RegisterRuntimeServiceServer(server, newRuntimeServer())
-	runtimeapi.RegisterImageServiceServer(server, newImageServer())
-	fmt.Printf("cri-shim: dummy CRI v1 backend listening on %s\n", socketPath)
-	if err := server.Serve(listener); err != nil {
-		panic(err)
+	runtimeapi.RegisterRuntimeServiceServer(server, &runtimeServer{host: host})
+	runtimeapi.RegisterImageServiceServer(server, &imageServer{host: host})
+	fmt.Printf("cri-shim: CRI v1 transport listening on %s; host CID %d port %d\n", socketPath, hostCID, hostPort)
+	if e = server.Serve(l); e != nil {
+		panic(e)
 	}
 }

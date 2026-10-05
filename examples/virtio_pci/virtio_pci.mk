@@ -254,6 +254,8 @@ $(UK_VSOCK_CONFIGURED): $(VIRTIO_EXAMPLE)/unikraft/vsock.config \
 
 $(UK_VSOCK_IMAGE): $(UK_VSOCK_CONFIGURED) libsddf_util.a \
 		$(VIRTIO_EXAMPLE)/host_vsock/main.c \
+		$(VIRTIO_EXAMPLE)/host_vsock/runtime_protocol.c \
+		$(VIRTIO_EXAMPLE)/host_vsock/runtime_protocol.h \
 		$(VIRTIO_EXAMPLE)/unikraft/libvsock/vsock.c \
 		$(VIRTIO_EXAMPLE)/unikraft/libvsock/include/uk/vsock.h
 	env -u BUILD_DIR -u MAKEFLAGS -u MAKEOVERRIDES \
