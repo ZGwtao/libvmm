@@ -178,7 +178,7 @@ def generate(
         serial_driver,
         serial_virt_tx,
         virt_rx=serial_virt_rx,
-        enable_color=False,
+        enable_color=True,
     )
     serial_system.add_client(vmm_client0)
     serial_system.add_client(vsock_backend)
