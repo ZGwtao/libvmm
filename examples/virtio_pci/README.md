@@ -14,6 +14,7 @@ This example makes use of the following virtIO devices emulated by libvmm:
 * console
 * block
 * network
+* vsock
 
 All of the virtIO devices are emulated with their corresponding native drivers
 from sDDF. The guest will interact with the virtIO devices on the virtual PCI bus.
@@ -111,6 +112,36 @@ Trustworthy Systems' website. To use your own images, specify `LINUX` and/or
 ```sh
 make MICROKIT_BOARD=qemu_virt_aarch64 MICROKIT_SDK=/path/to/sdk LINUX=/path/to/linux INITRD=/path/to/initrd
 ```
+
+This configuration exposes guest CID 3 as a virtio-vsock PCI function in slot
+3. The native Microkit `vsock_backend` PD listens as host CID 2 on port 1234
+and echoes stream payloads. A small statically linked client is appended to the
+downloaded initramfs. After the guest has booted, run it manually:
+
+```sh
+/root/vsock_echo_client
+```
+
+A successful exchange prints:
+
+```
+VSOCK_ECHO: listening on CID 2 port 1234
+VSOCK_ECHO: connection from CID 3 port ...
+vsock echo: received 'hello over virtio-vsock'
+```
+
+The VMM/backend ABI uses two sDDF-style SPSC packet queues, separate packet data
+regions, externally patched endpoint-relative configuration, and notifications.
+The echo endpoint is intentionally minimal: it implements only enough of the
+stream packet protocol to establish a connection, echo data, update credit, and
+close. It does not provide a general host socket API or any application-specific
+protocol.
+
+The supplied kernel image must have `CONFIG_VSOCKETS`,
+`CONFIG_VIRTIO_VSOCKETS`, and `CONFIG_VIRTIO_VSOCKETS_COMMON` enabled. libvmm
+does not build a kernel. If the default image lacks these options, provide a
+compatible existing image through `LINUX=/path/to/Image`; kernel source and
+configuration belong to the integrating project.
 
 If you would like to simulate the QEMU board you can run the following command:
 ```sh

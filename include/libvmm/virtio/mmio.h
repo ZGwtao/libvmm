@@ -46,6 +46,7 @@
 #define VIRTIO_DEVICE_ID_NET          1
 #define VIRTIO_DEVICE_ID_BLOCK        2
 #define VIRTIO_DEVICE_ID_CONSOLE      3
+#define VIRTIO_DEVICE_ID_VSOCK        19
 #define VIRTIO_DEVICE_ID_SOUND        25
 
 typedef struct virtio_mmio_data {

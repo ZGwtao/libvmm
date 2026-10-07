@@ -39,8 +39,9 @@ REPORT_FILE := report.txt
 
 include ${SDDF}/tools/make/board/common.mk
 
+VSOCK_ECHO_CLIENT := client_vm/vsock_echo_client
 CLIENT_VM_USERLEVEL_INIT := blk_client_init net_client_init
-CLIENT_VM_USERLEVEL_HOME := $(LIBVMM_TOOLS)/linux/blk/blk_integration_tests.sh $(LIBVMM_TOOLS)/linux/blk/blk_bench.sh
+CLIENT_VM_USERLEVEL_HOME := $(LIBVMM_TOOLS)/linux/blk/blk_integration_tests.sh $(LIBVMM_TOOLS)/linux/blk/blk_bench.sh $(VSOCK_ECHO_CLIENT)
 
 ifeq ($(ARCH),aarch64)
 	LINUX ?= 8b1d3a8587c60428c79d3e1981e7b6a7c653e1f8-linux
@@ -87,7 +88,7 @@ include $(LIBVMM)/vmm.mk
 include $(LIBVMM_TOOLS)/linux/blk/blk_init.mk
 include $(LIBVMM_TOOLS)/linux/net/net_init.mk
 
-IMAGES := client_vmm.elf timer_driver.elf blk_driver.elf blk_virt.elf serial_driver.elf serial_virt_tx.elf serial_virt_rx.elf \
+IMAGES := client_vmm.elf vsock_backend.elf timer_driver.elf blk_driver.elf blk_virt.elf serial_driver.elf serial_virt_tx.elf serial_virt_rx.elf \
 	network_virt_rx.elf network_virt_tx.elf eth_driver.elf network_copy.elf
 
 CHECK_FLAGS_BOARD_MD5 := .board_cflags-$(shell echo -- $(CFLAGS) $(BOARD) $(MICROKIT_CONFIG) | shasum | sed 's/ *-//')
@@ -133,6 +134,8 @@ endif
 	$(OBJCOPY) --update-section .net_virt_tx_config=net_virt_tx.data network_virt_tx.elf
 	$(OBJCOPY) --update-section .net_copy_config=net_copy_client0_net_copier.data network_copy.elf network_copy.elf
 	$(OBJCOPY) --update-section .net_client_config=net_client_CLIENT_VMM.data client_vmm.elf
+	$(OBJCOPY) --update-section .virtio_vsock_transport_config=virtio_vsock_transport_CLIENT_VMM.data client_vmm.elf
+	$(OBJCOPY) --update-section .virtio_vsock_transport_config=virtio_vsock_transport_vsock_backend.data vsock_backend.elf
 
 $(IMAGE_FILE) $(REPORT_FILE): $(IMAGES) $(SYSTEM_FILE)
 	$(MICROKIT_TOOL) $(SYSTEM_FILE) --search-path $(BUILD_DIR) --board $(MICROKIT_BOARD) \
@@ -159,7 +162,7 @@ ${INITRD}:
 	cp initrd_download_dir/${INITRD}/rootfs.cpio.gz ${INITRD}
 
 client_vm/rootfs.cpio.gz: ${INITRD} \
-	$(CLIENT_VM_USERLEVEL_INIT) |client_vm
+	$(CLIENT_VM_USERLEVEL_INIT) $(VSOCK_ECHO_CLIENT) |client_vm
 	$(LIBVMM)/tools/packrootfs ${INITRD} \
 		client_vm/rootfs_staging -o $@ \
 		--startup $(CLIENT_VM_USERLEVEL_INIT) \
@@ -185,6 +188,15 @@ client_vm/guest_arch_init.o: $(CLIENT_VM)/guest_arch_init.c $(CHECK_FLAGS_BOARD_
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 ifeq ($(ARCH),aarch64)
+GUEST_CC ?= aarch64-linux-gnu-gcc
+else
+GUEST_CC ?= gcc
+endif
+
+$(VSOCK_ECHO_CLIENT): $(VIRTIO_EXAMPLE)/guest/vsock_echo_client.c |client_vm
+	$(GUEST_CC) -static -Os -Wall -Wextra -o $@ $<
+
+ifeq ($(ARCH),aarch64)
 client_vm/images.o: $(LIBVMM)/tools/package_guest_images.S ${LINUX} $(CHECK_FLAGS_BOARD_MD5) \
 	                client_vm/vm.dtb client_vm/rootfs.cpio.gz
 	$(CC) -c -g3 -x assembler-with-cpp \
@@ -205,6 +217,12 @@ client_vm/images.o: $(LIBVMM)/tools/package_guest_images.S ${LINUX} $(CHECK_FLAG
 endif
 
 client_vmm.elf: client_vm/vmm.o client_vm/guest_arch_init.o client_vm/images.o libvmm.a |client_vm
+	$(LD) $(LDFLAGS) $^ $(LIBS) -o $@
+
+vsock_backend.o: $(VIRTIO_EXAMPLE)/host_vsock/echo.c $(CHECK_FLAGS_BOARD_MD5)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+vsock_backend.elf: vsock_backend.o libsddf_util_debug.a
 	$(LD) $(LDFLAGS) $^ $(LIBS) -o $@
 
 # Stop make from deleting intermediate files

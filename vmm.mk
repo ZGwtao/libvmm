@@ -67,6 +67,7 @@ ARCH_INDEP_FILES := \
 		    src/virtio/console.c \
 			src/virtio/block.c \
 			src/virtio/net.c \
+			src/virtio/vsock.c \
 		    src/virtio/virtio.c \
 			src/virtio/pci.c \
 			src/virtio/iterator.c \
