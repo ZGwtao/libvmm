@@ -19,6 +19,8 @@ IrqIoapic = SystemDescription.IrqIoapic
 VSOCK_QUEUE_CAPACITY = 8
 VSOCK_PACKET_BUFFER_SIZE = 4096
 VSOCK_CHANNEL = 20
+VSOCK_GUEST_CID = 3
+VSOCK_HOST_CID = 2
 
 
 def serialise_vsock_config(output_dir, name, tx_queue, tx_data, rx_queue, rx_data):
@@ -36,8 +38,10 @@ def serialise_vsock_config(output_dir, name, tx_queue, tx_data, rx_queue, rx_dat
         data_region_size,
     )
     data = struct.pack(
-        "<5s3x" + "QQ" * 4 + "IIB7x",
+        "<5s3xQQ" + "QQ" * 4 + "IIB7x",
         b"sDDF\x07",
+        VSOCK_GUEST_CID,
+        VSOCK_HOST_CID,
         *fields,
         VSOCK_QUEUE_CAPACITY,
         VSOCK_PACKET_BUFFER_SIZE,

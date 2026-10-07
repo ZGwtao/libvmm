@@ -10,7 +10,6 @@
 #include <libvmm/virtio/vsock_config.h>
 #include <libvmm/virtio/vsock_queue.h>
 
-#define VSOCK_HOST_CID 2ULL
 #define VSOCK_ECHO_PORT 1234U
 #define VSOCK_TYPE_STREAM 1U
 #define VSOCK_OP_REQUEST 1U
@@ -75,7 +74,7 @@ static void handle_packets(void)
         if (packet_len >= sizeof(request)) {
             memcpy(&request, packet, sizeof(request));
             if (request.type != VSOCK_TYPE_STREAM ||
-                request.dst_cid != VSOCK_HOST_CID ||
+                request.dst_cid != config.host_cid ||
                 request.dst_port != VSOCK_ECHO_PORT ||
                 request.len > packet_len - sizeof(request)) {
                 reply(&request, VSOCK_OP_RST, NULL, 0);
@@ -107,7 +106,7 @@ void init(void)
                             c->rx_queue.vaddr, c->rx_data.vaddr,
                             c->capacity, c->buffer_size);
     sddf_printf("VSOCK_ECHO: listening on CID %llu port %u\n",
-                (unsigned long long)VSOCK_HOST_CID, VSOCK_ECHO_PORT);
+                (unsigned long long)config.host_cid, VSOCK_ECHO_PORT);
 }
 
 void notified(microkit_channel ch)

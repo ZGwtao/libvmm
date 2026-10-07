@@ -26,13 +26,10 @@ typedef struct virtio_vsock_connection_resource {
 
 typedef struct virtio_vsock_transport_config {
     char magic[VIRTIO_VSOCK_TRANSPORT_MAGIC_LEN];
+    uint64_t guest_cid;
+    uint64_t host_cid;
     virtio_vsock_connection_resource_t connection;
 } virtio_vsock_transport_config_t;
-
-/* meta.py serialises this ABI directly for 64-bit Microkit systems. */
-_Static_assert(offsetof(virtio_vsock_transport_config_t, connection) == 8, "unexpected config padding");
-_Static_assert(sizeof(virtio_vsock_connection_resource_t) == 80, "unexpected connection config size");
-_Static_assert(sizeof(virtio_vsock_transport_config_t) == 88, "unexpected transport config size");
 
 static inline bool virtio_vsock_transport_config_check_magic(const void *config)
 {

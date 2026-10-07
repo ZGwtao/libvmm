@@ -132,7 +132,7 @@ bool virtio_arch_init(void)
     }
 
     if (!virtio_pci_vsock_init(&virtio_vsock, 0, 3, ARM_GIC_IRQ_ROUTE(GUEST_BOOT_VCPU_ID, 51),
-                               &vsock_queue, vsock_config.connection.id, 3)) {
+                               &vsock_queue, vsock_config.connection.id, vsock_config.guest_cid)) {
         LOG_VMM_ERR("Failed to initialise virtIO PCI vsock device\n");
         return false;
     }
